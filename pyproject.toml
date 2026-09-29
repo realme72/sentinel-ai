@@ -1,0 +1,63 @@
+[project]
+name = "sentinel-ai"
+version = "0.1.0"
+description = "Agentic vulnerability triage: scan -> enrich -> risk-score -> remediate -> ticket"
+requires-python = ">=3.12"
+dependencies = [
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    "psycopg[binary,pool]>=3.2",
+    "httpx>=0.28",
+    "typer>=0.15",
+    "rich>=13.9",
+    "structlog>=24.4",
+    "tenacity>=9.0",
+]
+
+[project.optional-dependencies]
+rag = [
+    "sentence-transformers>=3.3",
+    "qdrant-client>=1.12",
+    "pgvector>=0.3",
+    "langchain-text-splitters>=0.3",
+]
+agents = [
+    "anthropic>=0.40",
+    "langgraph>=0.2",
+    "langchain-core>=0.3",
+]
+tickets = [
+    "PyGithub>=2.5",
+    "jira>=3.8",
+]
+eval = [
+    "deepeval>=2.0",
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+]
+dev = [
+    "ruff>=0.8",
+    "mypy>=1.13",
+    "pytest>=8.3",
+]
+
+[project.scripts]
+sentinel = "sentinel.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sentinel"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests", "evals"]

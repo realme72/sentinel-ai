@@ -17,3 +17,4 @@ bin/
 *.egg-info/
 dist/
 .DS_Store
+data/raw/sbom/

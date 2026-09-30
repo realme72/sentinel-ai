@@ -132,5 +132,88 @@ def scan(
         console.print(f"[red]{len(failed)} hosts failed:[/red] {failed[:5]}")
 
 
+enrich_app = typer.Typer(help="Enrich CVEs from free feeds")
+app.add_typer(enrich_app, name="enrich")
+
+
+@enrich_app.command("kev")
+def enrich_kev() -> None:
+    """CISA Known Exploited Vulnerabilities (one bulk file)."""
+    from sentinel.enrich.kev import load_kev
+    console.print(load_kev())
+
+
+@enrich_app.command("epss")
+def enrich_epss() -> None:
+    """FIRST EPSS exploit probabilities (one bulk file)."""
+    from sentinel.enrich.epss import load_epss
+    console.print(load_epss())
+
+
+@enrich_app.command("nvd")
+def enrich_nvd(
+    limit: int = typer.Option(None, help="only this many CVEs"),
+    refresh: bool = typer.Option(False, help="re-fetch already-enriched CVEs"),
+    concurrency: int = typer.Option(8, help="in-flight requests (rate limiter still caps the rate)"),
+) -> None:
+    """NVD API 2.0: authoritative CVSS, CWE, descriptions. Resumable."""
+    from sentinel.enrich.nvd import load_nvd
+    console.print(load_nvd(limit=limit, refresh=refresh, concurrency=concurrency))
+
+
+@enrich_app.command("all")
+def enrich_all() -> None:
+    """KEV and EPSS first (bulk, seconds), then NVD (per-CVE, rate-limited)."""
+    from sentinel.enrich.epss import load_epss
+    from sentinel.enrich.kev import load_kev
+    from sentinel.enrich.nvd import load_nvd
+    console.print("kev :", load_kev())
+    console.print("epss:", load_epss())
+    console.print("nvd :", load_nvd())
+
+
+@app.command("score")
+def score() -> None:
+    """Apply the deterministic risk policy to every open finding."""
+    from sentinel.risk.pipeline import score_open_findings
+    console.print(score_open_findings())
+
+
+@app.command("triage")
+def triage(
+    limit: int = typer.Option(15, help="rows to show"),
+    band: str = typer.Option(None, help="filter: critical|high|medium|low"),
+    team: str = typer.Option(None, help="filter by owner team"),
+) -> None:
+    """The prioritised queue -- what an owner would actually be handed."""
+    where, params = ["1=1"], []
+    if band:
+        where.append("risk_band = %s"); params.append(band)
+    if team:
+        where.append("owner_team = %s"); params.append(team)
+    rows = db.query(
+        f"""SELECT hostname, cve_id, package_name, risk_score, risk_band,
+                   due_date, days_remaining, kev_listed, epss_score, owner_team
+            FROM v_current_risk WHERE {' AND '.join(where)}
+            ORDER BY risk_score DESC, epss_score DESC NULLS LAST LIMIT {int(limit)}""",
+        params or None,
+    )
+    t = Table(title="triage queue", show_header=True, header_style="bold")
+    for col in ("host", "cve", "package", "score", "band", "due", "days", "kev", "epss", "team"):
+        t.add_column(col, justify="right" if col in {"score", "days", "epss"} else "left")
+    palette = {"critical": "bold red", "high": "red", "medium": "yellow", "low": "dim"}
+    for r in rows:
+        t.add_row(
+            r["hostname"], r["cve_id"], r["package_name"][:18],
+            f"{r['risk_score']:.1f}",
+            f"[{palette.get(r['risk_band'],'')}]{r['risk_band']}[/]",
+            str(r["due_date"]), str(r["days_remaining"]),
+            "YES" if r["kev_listed"] else "",
+            f"{r['epss_score']:.3f}" if r["epss_score"] is not None else "",
+            r["owner_team"],
+        )
+    console.print(t)
+
+
 if __name__ == "__main__":
     app()

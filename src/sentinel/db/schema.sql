@@ -211,3 +211,26 @@ CREATE INDEX IF NOT EXISTS idx_chunks_tsv ON corpus_chunks USING GIN (tsv);
 CREATE INDEX IF NOT EXISTS idx_chunks_cves ON corpus_chunks USING GIN (cve_ids);
 CREATE INDEX IF NOT EXISTS idx_chunks_trgm ON corpus_chunks USING GIN (content gin_trgm_ops);
 -- Vector half. HNSW built after bulk load (see db/session.py: build_vector_index).
+
+-- ---------------------------------------------------------------------------
+-- Convenience view: the current assessment per finding, joined to owner and
+-- CVE facts. This is what the API and dashboard read; it keeps the
+-- append-only history out of every downstream query.
+-- ---------------------------------------------------------------------------
+CREATE OR REPLACE VIEW v_current_risk AS
+SELECT DISTINCT ON (f.id)
+       f.id AS finding_id, f.status, f.package_name, f.installed_version,
+       f.fixed_version, f.package_type, f.first_seen,
+       a.id AS asset_id, a.hostname, a.environment, a.internet_facing,
+       a.business_criticality, a.owner_team, a.owner_email,
+       c.cve_id, c.cvss_v31_score, c.cvss_severity, c.epss_score,
+       c.kev_listed, c.kev_ransomware,
+       ra.risk_score, ra.risk_band, ra.sla_days, ra.due_date,
+       ra.factors, ra.policy_version, ra.computed_at,
+       (ra.due_date < CURRENT_DATE) AS overdue,
+       (ra.due_date - CURRENT_DATE) AS days_remaining
+FROM findings f
+JOIN assets a ON a.id = f.asset_id
+JOIN cves   c ON c.cve_id = f.cve_id
+JOIN risk_assessments ra ON ra.finding_id = f.id
+ORDER BY f.id, ra.computed_at DESC;

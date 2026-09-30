@@ -144,3 +144,45 @@ def test_floor_never_lowers_an_already_higher_band():
     r = score_finding(LOG4SHELL, PROD_EDGE)
     assert r.band == "critical"
     assert r.factors["band_floor_rule"] is None  # scored there on its own
+
+
+# --- CISA deadlines that expired before detection --------------------------
+
+
+def test_expired_cisa_deadline_does_not_create_a_ticket_born_overdue():
+    """Log4Shell's CISA deadline was 2021-12-24. Finding it on a new host in
+    2026 must still give the owner a window they can actually hit -- while
+    recording that the compliance deadline is long gone."""
+    risk = score_finding(LOG4SHELL, DEV_BOX)
+    sla = resolve_sla(
+        risk, LOG4SHELL, first_seen=SEEN, internet_facing=False,
+        kev_due_date=date(2021, 12, 24),
+    )
+    assert sla.due_date == date(2026, 10, 3)      # 3 days from detection, not 2021
+    assert sla.due_date > SEEN                     # never born overdue
+    assert sla.rule == "kev_deadline_already_passed"
+    assert sla.kev_deadline_passed is True
+    assert sla.kev_due_date == date(2021, 12, 24)  # breach still on the record
+
+
+def test_future_cisa_deadline_still_tightens_the_clock():
+    """The clamp must not swallow deadlines that haven't passed yet."""
+    risk = score_finding(LOG4SHELL, DEV_BOX)
+    sla = resolve_sla(
+        risk, LOG4SHELL, first_seen=SEEN, internet_facing=False,
+        kev_due_date=date(2026, 10, 2),
+    )
+    assert sla.due_date == date(2026, 10, 2)
+    assert sla.rule == "cisa_kev_due_date_ceiling"
+    assert sla.kev_deadline_passed is False
+
+
+def test_emergency_path_also_records_an_expired_deadline():
+    risk = score_finding(LOG4SHELL, PROD_EDGE)
+    sla = resolve_sla(
+        risk, LOG4SHELL, first_seen=SEEN, internet_facing=True,
+        kev_due_date=date(2021, 12, 24),
+    )
+    assert sla.rule == "emergency_kev_internet_facing"
+    assert sla.due_date == date(2026, 10, 3)
+    assert sla.kev_deadline_passed is True

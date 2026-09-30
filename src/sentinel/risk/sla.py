@@ -28,6 +28,11 @@ class SlaResult:
     sla_days: int
     due_date: date
     rule: str
+    # A CISA deadline that expired before we detected the finding is a
+    # compliance fact, not a remediation clock. Recorded separately so the
+    # breach is never lost, while `due_date` stays something an owner can hit.
+    kev_deadline_passed: bool = False
+    kev_due_date: date | None = None
     policy_version: str = POLICY_VERSION
 
 
@@ -42,9 +47,10 @@ def resolve_sla(
     """Pick the *tightest* applicable deadline.
 
     Precedence, strictest first:
-      1. KEV + internet-facing  -> 3 days (emergency)
-      2. CISA KEV due date      -> ceiling, if it lands earlier than our band
-      3. Risk band baseline     -> 7 / 15 / 45 / 90 days
+      1. KEV + internet-facing        -> 3 days (emergency)
+      2. CISA deadline already passed -> 3 days from detection, breach flagged
+      3. CISA KEV due date            -> ceiling, if earlier than our band
+      4. Risk band baseline           -> 7 / 15 / 45 / 90 days
     """
     band_days = BAND_SLA_DAYS.get(risk.band, BAND_SLA_DAYS["low"])
     baseline_due = first_seen + timedelta(days=band_days)
@@ -54,6 +60,22 @@ def resolve_sla(
             sla_days=EMERGENCY_SLA_DAYS,
             due_date=first_seen + timedelta(days=EMERGENCY_SLA_DAYS),
             rule="emergency_kev_internet_facing",
+            kev_deadline_passed=bool(kev_due_date and kev_due_date < first_seen),
+            kev_due_date=kev_due_date,
+        )
+
+    # The CISA deadline expired before we even found this. Using it as the due
+    # date would file a ticket that is born overdue: the owner has no window to
+    # hit, and every KEV finding shows as SLA-breached on day one, which
+    # destroys the signal in the SLA metric. Give a real window, keep the
+    # breach on the record.
+    if cve.kev_listed and kev_due_date and kev_due_date < first_seen:
+        return SlaResult(
+            sla_days=EMERGENCY_SLA_DAYS,
+            due_date=first_seen + timedelta(days=EMERGENCY_SLA_DAYS),
+            rule="kev_deadline_already_passed",
+            kev_deadline_passed=True,
+            kev_due_date=kev_due_date,
         )
 
     # CISA publishes a remediation deadline for KEV entries. If it is sooner
@@ -64,12 +86,14 @@ def resolve_sla(
             sla_days=max((kev_due_date - first_seen).days, 0),
             due_date=kev_due_date,
             rule="cisa_kev_due_date_ceiling",
+            kev_due_date=kev_due_date,
         )
 
     return SlaResult(
         sla_days=band_days,
         due_date=baseline_due,
         rule=f"band_baseline_{risk.band}",
+        kev_due_date=kev_due_date,
     )
 
 

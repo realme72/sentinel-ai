@@ -38,24 +38,39 @@ def load_kev() -> dict:
             "due_date": e.get("dueDate") or None,
             # CISA encodes this as the strings "Known" / "Unknown".
             "ransomware": (e.get("knownRansomwareCampaignUse") or "").strip().lower() == "known",
+            # The only vendor-neutral remediation instruction in any free feed.
+            "required_action": e.get("requiredAction") or None,
+            "short_description": e.get("shortDescription") or None,
+            "vulnerability_name": e.get("vulnerabilityName") or None,
         }
         for e in entries
         if e.get("cveID")
     ]
 
     with connection() as conn, conn.cursor() as cur:
-        cur.execute("CREATE TEMP TABLE _kev (cve_id TEXT PRIMARY KEY, date_added DATE, "
-                    "due_date DATE, ransomware BOOLEAN) ON COMMIT DROP")
-        with cur.copy("COPY _kev (cve_id, date_added, due_date, ransomware) FROM STDIN") as cp:
+        cur.execute(
+            "CREATE TEMP TABLE _kev (cve_id TEXT PRIMARY KEY, date_added DATE, "
+            "due_date DATE, ransomware BOOLEAN, required_action TEXT, "
+            "short_description TEXT, vulnerability_name TEXT) ON COMMIT DROP"
+        )
+        with cur.copy(
+            "COPY _kev (cve_id, date_added, due_date, ransomware, required_action, "
+            "short_description, vulnerability_name) FROM STDIN"
+        ) as cp:
             for r in rows:
-                cp.write_row((r["cve_id"], r["date_added"], r["due_date"], r["ransomware"]))
+                cp.write_row((r["cve_id"], r["date_added"], r["due_date"], r["ransomware"],
+                              r["required_action"], r["short_description"],
+                              r["vulnerability_name"]))
 
         cur.execute(
             """
             UPDATE cves c SET kev_listed = TRUE,
                               kev_date_added = k.date_added,
                               kev_due_date = k.due_date,
-                              kev_ransomware = k.ransomware
+                              kev_ransomware = k.ransomware,
+                              kev_required_action = k.required_action,
+                              kev_short_description = k.short_description,
+                              kev_vulnerability_name = k.vulnerability_name
             FROM _kev k WHERE k.cve_id = c.cve_id
             """
         )

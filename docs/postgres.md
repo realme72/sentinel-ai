@@ -143,3 +143,31 @@ brew services stop postgresql@16 2>/dev/null
 brew uninstall postgresql@16
 rm -rf /opt/homebrew/var/postgresql@16
 ```
+
+## Retrieval benchmark (2026-10-01)
+
+Corpus: 720 documents, 2,211 chunks, 384-d bge-small embeddings.
+
+| backend | ef | filtered | recall@8 | prec@8 | p50 ms |
+|---|---|---|---|---|---|
+| pgvector | 16 | yes | 1.000 | 1.000 | 0.98 |
+| qdrant | 16 | yes | 1.000 | 1.000 | 1.60 |
+| pgvector | 64 | yes | 1.000 | 1.000 | 0.96 |
+| qdrant | 64 | yes | 1.000 | 1.000 | 2.50 |
+| pgvector | 64 | no | 0.335 | 0.131 | 17.16 |
+| qdrant | 64 | no | 0.335 | 0.131 | 1.83 |
+
+**The two engines are indistinguishable on quality at this scale.** Both return
+results identical to exact brute-force nearest neighbour (recall 1.00 against
+ground truth), because 2,211 vectors is far too few for HNSW's approximation to
+approximate anything.
+
+pgvector is ~2x faster on the filtered path, which is the path this system
+actually uses: a CVE filter selects ~3 chunks out of 2,211, and brute-forcing 3
+vectors beats traversing any graph. Qdrant is markedly faster *unfiltered* at
+higher `ef_search`, where pgvector's planner stops short-circuiting.
+
+Conclusion: **pgvector is the right default here.** Qdrant stays behind the
+`VectorStore` protocol; its filtered-HNSW advantage needs a corpus orders of
+magnitude larger (millions of vectors, less selective filters) before it can
+show. Re-run `sentinel rag benchmark` when the corpus grows.

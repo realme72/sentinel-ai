@@ -210,6 +210,77 @@ def enrich_all() -> None:
     console.print("nvd :", load_nvd())
 
 
+rag_app = typer.Typer(help="Retrieval corpus and search")
+app.add_typer(rag_app, name="rag")
+
+
+@rag_app.command("build")
+def rag_build(
+    rebuild: bool = typer.Option(False, help="truncate and rebuild from scratch"),
+) -> None:
+    """Build the corpus: chunk enriched CVEs, embed locally, index."""
+    from sentinel.rag.corpus import build_corpus
+    console.print(build_corpus(rebuild=rebuild))
+
+
+@rag_app.command("sync")
+def rag_sync(
+    backend: str = typer.Option("qdrant", help="secondary store to mirror into"),
+) -> None:
+    """Mirror corpus chunks into the secondary vector store."""
+    from sentinel.rag.qdrant_store import QdrantStore
+    from sentinel.rag.sync import sync_store
+    stores = {"qdrant": QdrantStore}
+    console.print(sync_store(stores[backend]()))
+
+
+@rag_app.command("search")
+def rag_search(
+    query_text: str = typer.Argument(..., help="search query"),
+    k: int = typer.Option(8),
+    mode: str = typer.Option("hybrid", help="hybrid | dense | lexical"),
+    backend: str = typer.Option("pgvector", help="pgvector | qdrant"),
+    no_prefilter: bool = typer.Option(False, help="disable the CVE metadata prefilter"),
+) -> None:
+    """Hybrid search over the corpus."""
+    from sentinel.rag.hybrid import search as hybrid_search
+    from sentinel.rag.pgvector_store import PgVectorStore
+    from sentinel.rag.qdrant_store import QdrantStore
+
+    store = QdrantStore() if backend == "qdrant" else PgVectorStore()
+    r = hybrid_search(query_text, store=store, k=k, mode=mode,
+                      prefilter=not no_prefilter)
+    console.print(f"[dim]{r['mode']}/{r['backend']} "
+                  f"prefilter={r['prefilter_cves'] or 'none'} "
+                  f"{r['total_ms']}ms {r['timings']}[/dim]")
+    tbl = Table(show_header=True, header_style="bold")
+    for col in ("rrf", "lex", "dense", "cve", "chunk"):
+        tbl.add_column(col)
+    for h in r["hits"]:
+        tbl.add_row(f"{h.rrf_score:.5f}", str(h.lexical_rank or "-"),
+                    str(h.dense_rank or "-"), ",".join(h.cve_ids)[:16],
+                    h.content[:74])
+    console.print(tbl)
+
+
+@rag_app.command("benchmark")
+def rag_benchmark(
+    k: int = typer.Option(8),
+    queries: int = typer.Option(60),
+) -> None:
+    """pgvector vs Qdrant: recall@k and latency, filtered and unfiltered."""
+    from sentinel.rag.benchmark import run
+    rows = run(k=k, n_queries=queries)
+    tbl = Table(title=f"retrieval benchmark (k={k})", show_header=True)
+    for col in ("backend", "ef", "filtered", "recall@k", "prec@k", "p50 ms", "p95 ms"):
+        tbl.add_column(col, justify="right" if col not in ("backend", "filtered") else "left")
+    for r in rows:
+        tbl.add_row(r["backend"], str(r["ef_search"]), str(r["filtered"]),
+                    f"{r['recall_at_k']:.3f}", f"{r['precision_at_k']:.3f}",
+                    f"{r['p50_ms']:.2f}", f"{r['p95_ms']:.2f}")
+    console.print(tbl)
+
+
 @app.command("score")
 def score() -> None:
     """Apply the deterministic risk policy to every open finding."""

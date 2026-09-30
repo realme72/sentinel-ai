@@ -100,7 +100,8 @@ The pipeline touches ~40k findings but makes ~200 LLM calls. In order of impact:
 
 Runs entirely on localhost. **No Docker required.**
 
-- Postgres 16 + pgvector 0.8 (rows, BM25, and vectors in one transactional store)
+- Postgres 18 + pgvector 0.8.6 (rows, BM25, and vectors in one transactional store)
+  plus `citext`, `btree_gin`, `pg_trgm`, `pgcrypto`, `unaccent`, `pg_stat_statements`
 - Qdrant 1.19 (native `aarch64-apple-darwin` binary in `bin/`)
 - LangGraph agents · Anthropic Claude (Opus 5 planner, Haiku 4.5 bulk)
 - sentence-transformers (local embeddings, no API cost)
@@ -119,7 +120,7 @@ Runs entirely on localhost. **No Docker required.**
 ## Quickstart
 
 ```bash
-brew install uv trivy postgresql@16
+brew install uv trivy postgresql@18 pgvector
 uv venv --python 3.12 && uv pip install -e ".[dev]"
 createdb sentinel && psql -d sentinel -f src/sentinel/db/schema.sql
 cp .env.example .env

@@ -5,15 +5,23 @@
 -- traceable to the retrieval context that produced it. Due dates are
 -- computed by the deterministic SLA policy, never by a model.
 
-CREATE EXTENSION IF NOT EXISTS vector;
-CREATE EXTENSION IF NOT EXISTS pg_trgm;
+-- Target: PostgreSQL 18.
+--
+-- Extensions, and why each one is here rather than "might be handy":
+CREATE EXTENSION IF NOT EXISTS vector;              -- dense retrieval (HNSW)
+CREATE EXTENSION IF NOT EXISTS pg_trgm;             -- fuzzy match on package/version strings
+CREATE EXTENSION IF NOT EXISTS btree_gin;           -- composite GIN: scalar cols + arrays in ONE index
+CREATE EXTENSION IF NOT EXISTS citext;              -- case-insensitive hostnames and emails
+CREATE EXTENSION IF NOT EXISTS pgcrypto;            -- digest() for ticket idempotency keys
+CREATE EXTENSION IF NOT EXISTS unaccent;            -- normalise vendor advisory text for tsvector
+CREATE EXTENSION IF NOT EXISTS pg_stat_statements;  -- per-query latency; needed to answer "what got slow"
 
 -- ---------------------------------------------------------------------------
 -- Asset inventory (the CMDB stand-in)
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS assets (
     id                  BIGSERIAL PRIMARY KEY,
-    hostname            TEXT NOT NULL UNIQUE,
+    hostname            CITEXT NOT NULL UNIQUE,
     ip_address          INET,
     os_family           TEXT NOT NULL,              -- debian | rhel | alpine | windows
     os_version          TEXT,
@@ -22,7 +30,7 @@ CREATE TABLE IF NOT EXISTS assets (
     internet_facing     BOOLEAN NOT NULL DEFAULT FALSE,
     data_classification TEXT NOT NULL DEFAULT 'internal',  -- public|internal|confidential|restricted
     owner_team          TEXT NOT NULL,
-    owner_email         TEXT NOT NULL,
+    owner_email         CITEXT NOT NULL,
     tags                JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()

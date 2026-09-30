@@ -1,4 +1,4 @@
-PG := /opt/homebrew/opt/postgresql@16/bin
+PG := /opt/homebrew/opt/postgresql@18/bin
 VENV := .venv/bin
 
 .PHONY: setup db qdrant test lint fmt clean

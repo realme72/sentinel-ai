@@ -128,22 +128,24 @@ def test_kev_ransomware_cannot_be_banded_below_critical():
     """Context may raise urgency; it may not dilute evidence of active
     exploitation. Scored 71 on this box, floored to critical."""
     r = score_finding(LOG4SHELL, DEV_BOX)
-    assert r.factors["scored_band"] == "high"
     assert r.band == "critical"
-    assert r.factors["band_floor_rule"] == "kev_ransomware_floor"
+    assert r.factors["band_floor"]["scored_band"] == "high"
+    assert r.factors["band_floor"]["rule"] == "kev_ransomware_floor"
 
 
 def test_plain_kev_floors_at_high():
     quiet_kev = CveFacts(cve_id="CVE-C", cvss_v31_score=4.0, kev_listed=True)
     r = score_finding(quiet_kev, DEV_BOX)
     assert r.band == "high"
-    assert r.factors["band_floor_rule"] == "kev_floor"
+    assert r.factors["band_floor"]["rule"] == "kev_floor"
 
 
 def test_floor_never_lowers_an_already_higher_band():
     r = score_finding(LOG4SHELL, PROD_EDGE)
     assert r.band == "critical"
-    assert r.factors["band_floor_rule"] is None  # scored there on its own
+    # No band_floor key at all: "nothing happened" is the common case and is
+    # not worth storing on 100,000 rows.
+    assert "band_floor" not in r.factors
 
 
 # --- CISA deadlines that expired before detection --------------------------
@@ -186,3 +188,13 @@ def test_emergency_path_also_records_an_expired_deadline():
     assert sla.rule == "emergency_kev_internet_facing"
     assert sla.due_date == date(2026, 10, 3)
     assert sla.kev_deadline_passed is True
+
+
+def test_factors_carry_no_data_already_present_in_a_column():
+    """factors was 86% of the assessment table's heap. Anything derivable from
+    a column or from POLICY_VERSION must not be duplicated onto every row."""
+    r = score_finding(LOG4SHELL, PROD_EDGE)
+    for redundant in ("cve_id", "hostname", "total", "band", "scored_band"):
+        assert redundant not in r.factors, f"{redundant} duplicates a column"
+    for component in r.factors["components"].values():
+        assert "max" not in component, "component ceilings are constants in code"

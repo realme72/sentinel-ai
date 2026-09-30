@@ -16,6 +16,7 @@ import re
 import subprocess
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
 import structlog
@@ -87,6 +88,43 @@ def scan_sbom(sbom_path: str) -> ScanOutcome:
                 }
             )
     return ScanOutcome(hostname, findings, skipped)
+
+
+def refresh_vuln_db(max_age_hours: int = 24) -> dict:
+    """Refresh Trivy's local vulnerability database if it is stale.
+
+    Trivy caches its DB on disk and will happily keep scanning with a
+    months-old copy, silently reporting zero new CVEs. That failure is
+    invisible -- scans succeed, findings just stop appearing -- so freshness
+    is checked rather than assumed.
+    """
+    meta = Path.home() / "Library" / "Caches" / "trivy" / "db" / "metadata.json"
+    if not meta.exists():
+        meta = Path.home() / ".cache" / "trivy" / "db" / "metadata.json"
+
+    age_hours = None
+    if meta.exists():
+        try:
+            downloaded = json.loads(meta.read_text()).get("DownloadedAt", "")
+            ts = datetime.fromisoformat(downloaded.replace("Z", "+00:00"))
+            age_hours = (datetime.now(UTC) - ts).total_seconds() / 3600
+        except (json.JSONDecodeError, ValueError, OSError):
+            age_hours = None
+
+    if age_hours is not None and age_hours < max_age_hours:
+        log.info("trivy.db.fresh", age_hours=round(age_hours, 1))
+        return {"refreshed": False, "age_hours": round(age_hours, 1)}
+
+    log.info("trivy.db.refreshing", age_hours=age_hours)
+    proc = subprocess.run(
+        ["trivy", "image", "--download-db-only", "--quiet"],
+        capture_output=True, text=True, timeout=600,
+    )
+    if proc.returncode != 0:
+        # A stale DB still scans, so this warns rather than aborting the run.
+        log.warning("trivy.db.refresh_failed", error=(proc.stderr or "")[:300])
+        return {"refreshed": False, "error": (proc.stderr or "")[:300]}
+    return {"refreshed": True, "previous_age_hours": age_hours}
 
 
 def scan_fleet(sbom_dir: Path, max_workers: int = 8) -> list[ScanOutcome]:
@@ -192,12 +230,17 @@ def load_findings(outcomes: list[ScanOutcome], asset_ids: dict[str, int], scan_i
             list(cve_seed.values()),
         )
 
+        # TEMP, not UNLOGGED. An UNLOGGED table is permanent and shared:
+        # two concurrent scans would interleave rows into it and cross-
+        # contaminate findings, and a crash between TRUNCATE and DROP would
+        # leak stale rows into the next run. TEMP is session-scoped and
+        # dropped automatically, and is already unlogged in modern Postgres.
         cur.execute(
             """
-            CREATE UNLOGGED TABLE IF NOT EXISTS _stage_findings (
+            CREATE TEMP TABLE _stage_findings (
                 asset_id BIGINT, cve_id TEXT, package_name TEXT,
                 installed_version TEXT, fixed_version TEXT, package_type TEXT
-            ); TRUNCATE _stage_findings;
+            ) ON COMMIT DROP
             """
         )
         with cur.copy(
@@ -225,12 +268,12 @@ def load_findings(outcomes: list[ScanOutcome], asset_ids: dict[str, int], scan_i
                 last_seen     = now(),
                 last_scan_id  = EXCLUDED.last_scan_id,
                 fixed_version = EXCLUDED.fixed_version,
-                status        = CASE WHEN findings.status = 'fixed' THEN 'open' ELSE findings.status END
+                status        = CASE WHEN findings.status = 'fixed'
+                                     THEN 'open' ELSE findings.status END
             """,
             (scan_id, scan_id),
         )
         inserted = cur.rowcount
-        cur.execute("DROP TABLE IF EXISTS _stage_findings")
 
     return {
         "cves": len(cve_seed),

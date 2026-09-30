@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import time
-from pathlib import Path
 
 import structlog
 import typer
@@ -45,6 +44,36 @@ def db_reset(
     console.print("[yellow]database reset[/yellow]")
 
 
+@db_app.command("migrate")
+def db_migrate(
+    revision: str = typer.Argument("head", help="target revision"),
+) -> None:
+    """Run Alembic migrations up to a revision (default: head)."""
+    db.upgrade_to(revision)
+    console.print(f"[green]migrated to {revision}[/green]")
+
+
+@db_app.command("history")
+def db_history() -> None:
+    """Show migration history and which revision is applied."""
+    from alembic import command
+    command.history(db.alembic_config(), indicate_current=True)
+
+
+@db_app.command("prune")
+def db_prune(
+    retain_days: int = typer.Option(90, help="keep explanations this many days"),
+) -> None:
+    """Drop the factors explanation from superseded assessments.
+
+    Scores, bands and due dates are always kept -- only the verbose
+    per-component reasoning is removed, and only from rows that are no longer
+    current and are older than the retention window.
+    """
+    row = db.query_one("SELECT prune_risk_history(%s) AS pruned", (retain_days,))
+    console.print(f"pruned explanations from [yellow]{row['pruned']:,}[/yellow] historical rows")
+
+
 @db_app.command("stats")
 def db_stats() -> None:
     """Row counts and the current triage picture."""
@@ -60,7 +89,8 @@ def db_stats() -> None:
         """
     )
     table = Table(title="sentinel", show_header=True)
-    table.add_column("table"); table.add_column("rows", justify="right")
+    table.add_column("table")
+    table.add_column("rows", justify="right")
     for r in rows:
         table.add_row(r["t"], f"{r['n']:,}")
     console.print(table)
@@ -92,12 +122,18 @@ def scan(
 ) -> None:
     """Scan every SBOM with Trivy and load assets, CVEs and findings."""
     from sentinel.ingest.synth import generate_assets
-    from sentinel.ingest.trivy import load_assets, load_findings, scan_fleet
+    from sentinel.ingest.trivy import (
+        load_assets,
+        load_findings,
+        refresh_vuln_db,
+        scan_fleet,
+    )
 
     settings = get_settings()
     sbom_dir = settings.raw_dir / "sbom"
 
     t0 = time.perf_counter()
+    console.print(f"trivy db: {refresh_vuln_db()}")
     assets = generate_assets(count, seed)
     asset_ids = load_assets(assets)
     console.print(f"assets loaded: {len(asset_ids):,}")
@@ -154,7 +190,9 @@ def enrich_epss() -> None:
 def enrich_nvd(
     limit: int = typer.Option(None, help="only this many CVEs"),
     refresh: bool = typer.Option(False, help="re-fetch already-enriched CVEs"),
-    concurrency: int = typer.Option(8, help="in-flight requests (rate limiter still caps the rate)"),
+    concurrency: int = typer.Option(
+        8, help="in-flight requests; the rate limiter still caps the rate"
+    ),
 ) -> None:
     """NVD API 2.0: authoritative CVSS, CWE, descriptions. Resumable."""
     from sentinel.enrich.nvd import load_nvd
@@ -188,19 +226,25 @@ def triage(
     """The prioritised queue -- what an owner would actually be handed."""
     where, params = ["1=1"], []
     if band:
-        where.append("risk_band = %s"); params.append(band)
+        where.append("risk_band = %s")
+        params.append(band)
     if team:
-        where.append("owner_team = %s"); params.append(team)
+        where.append("owner_team = %s")
+        params.append(team)
     rows = db.query(
         f"""SELECT hostname, cve_id, package_name, risk_score, risk_band,
                    due_date, days_remaining, kev_listed, epss_score, owner_team
             FROM v_current_risk WHERE {' AND '.join(where)}
-            ORDER BY risk_score DESC, epss_score DESC NULLS LAST LIMIT {int(limit)}""",
+            ORDER BY risk_score DESC, epss_score DESC NULLS LAST
+            LIMIT {int(limit)}""",
         params or None,
     )
     t = Table(title="triage queue", show_header=True, header_style="bold")
-    for col in ("host", "cve", "package", "score", "band", "due", "days", "kev", "epss", "team"):
-        t.add_column(col, justify="right" if col in {"score", "days", "epss"} else "left")
+    columns = ("host", "cve", "package", "score", "band", "due",
+               "days", "kev", "epss", "team")
+    numeric = {"score", "days", "epss"}
+    for col in columns:
+        t.add_column(col, justify="right" if col in numeric else "left")
     palette = {"critical": "bold red", "high": "red", "medium": "yellow", "low": "dim"}
     for r in rows:
         t.add_row(

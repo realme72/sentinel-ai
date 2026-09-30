@@ -109,13 +109,40 @@ Runs entirely on localhost. **No Docker required.**
 
 ## Status
 
-- [x] Schema, deterministic risk + SLA engine, 18 passing tests
-- [ ] Trivy ingest + synthetic 500-asset fleet
-- [ ] NVD / KEV / EPSS enrichment
+- [x] Schema under Alembic migrations, deterministic risk + SLA engine, 22 tests
+- [x] Synthetic 500-host fleet with real vulnerabilities (100,937 findings, 720 CVEs)
+- [x] NVD / KEV / EPSS enrichment
 - [ ] Hybrid retrieval + dual vector store
 - [ ] LangGraph remediation planner + grounding gate
 - [ ] DeepEval suite in CI
 - [ ] Correlation agent, owner digests, dashboard
+
+### Measured
+
+| Stage | Scale | Time |
+|---|---|---|
+| Trivy scan | 500 hosts | 6.2s (81 hosts/s) |
+| Load findings | 100,937 rows | 2.2s |
+| KEV + EPSS | 382k feed rows | 4s |
+| NVD enrichment | 690 CVEs | 423s (rate-limit bound) |
+| Risk scoring | 100,937 findings | 0.8s (126k rows/s) |
+| Triage query | 20 of 100,937 | 5.2ms |
+
+## Schema changes
+
+Migrations are the single source of truth. `docs/schema.reference.sql` is a
+generated snapshot for reading only -- two files that can both create tables is
+how a schema and its history drift apart.
+
+```bash
+make migrate      # apply to head
+make history      # what's applied
+make drift        # verify migrations reproduce the live schema
+```
+
+`make drift` builds a throwaway database from migrations and diffs it against
+the live one. It already caught an HNSW index that existed only because it had
+been created by hand.
 
 ## Quickstart
 

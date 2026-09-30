@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        # pgvector's own image, so the extension is present without a build.
+        image: pgvector/pgvector:pg18
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: sentinel
+        ports: ["5432:5432"]
+        # pg_stat_statements needs preloading; the migration creates the
+        # extension, and without this the CREATE succeeds but the view errors.
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+          --name pg
+
+    env:
+      SENTINEL_PG_DSN: postgresql://postgres:postgres@localhost:5432/sentinel
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Enable pg_stat_statements
+        run: |
+          docker exec pg bash -c \
+            "echo \"shared_preload_libraries = 'pg_stat_statements'\" >> /var/lib/postgresql/data/postgresql.conf"
+          docker restart pg
+          for i in $(seq 1 30); do
+            docker exec pg pg_isready -U postgres && break
+            sleep 1
+          done
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install
+        run: |
+          uv venv --python 3.12 .venv
+          uv pip install -e ".[dev]"
+
+      - name: Lint
+        run: .venv/bin/ruff check src tests
+
+      - name: Migrations apply to an empty database
+        run: .venv/bin/sentinel db migrate
+
+      - name: Migrations are idempotent
+        run: .venv/bin/sentinel db migrate
+
+      - name: Tests
+        run: .venv/bin/pytest -q

@@ -20,7 +20,28 @@ from sentinel.config import get_settings
 
 _pool: ConnectionPool | None = None
 
-SCHEMA_PATH = Path(__file__).with_name("schema.sql")
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+
+
+def alembic_config():
+    """Alembic config resolved from the project root.
+
+    Built in-process rather than shelling out to the `alembic` binary: that
+    binary is only on PATH when the venv is activated, so a subprocess call
+    breaks the moment the CLI is invoked by its absolute path, by a cron
+    entry, or by a worker.
+    """
+    from alembic.config import Config
+
+    cfg = Config(str(PROJECT_ROOT / "alembic.ini"))
+    cfg.set_main_option("script_location", str(PROJECT_ROOT / "alembic"))
+    return cfg
+
+
+def upgrade_to(revision: str = "head") -> None:
+    from alembic import command
+
+    command.upgrade(alembic_config(), revision)
 
 
 def get_pool() -> ConnectionPool:
@@ -73,8 +94,14 @@ def execute(sql: str, params: Sequence[Any] | dict[str, Any] | None = None) -> i
 
 
 def apply_schema() -> None:
-    with connection() as conn:
-        conn.execute(SCHEMA_PATH.read_text())
+    """Bring the database to the latest migration.
+
+    Migrations are the single source of truth for schema.
+    `docs/schema.reference.sql` is a generated snapshot for reading, never for
+    executing -- two files that can both create tables is how a schema and its
+    migration history drift apart.
+    """
+    upgrade_to("head")
 
 
 def build_vector_index(*, m: int = 16, ef_construction: int = 64) -> None:
@@ -87,24 +114,29 @@ def build_vector_index(*, m: int = 16, ef_construction: int = 64) -> None:
     with connection() as conn:
         conn.execute(
             f"""
-            CREATE INDEX IF NOT EXISTS idx_chunks_embedding ON corpus_chunks
-            USING hnsw (embedding vector_cosine_ops)
+            CREATE INDEX IF NOT EXISTS idx_chunks_embedding
+            ON corpus_chunks USING hnsw (embedding vector_cosine_ops)
             WITH (m = {int(m)}, ef_construction = {int(ef_construction)})
             """
         )
 
 
 def reset_database() -> None:
-    """Drop every table and reapply the schema. Destructive, dev-only."""
+    """Drop every table and re-run migrations from scratch. Destructive, dev-only."""
     with connection() as conn:
         conn.execute(
             """
             DO $$ DECLARE r RECORD; BEGIN
               FOR r IN (SELECT tablename FROM pg_tables WHERE schemaname='public')
-              LOOP EXECUTE 'DROP TABLE IF EXISTS ' || quote_ident(r.tablename) || ' CASCADE'; END LOOP;
+              LOOP EXECUTE 'DROP TABLE IF EXISTS '
+                || quote_ident(r.tablename) || ' CASCADE'; END LOOP;
+              FOR r IN (SELECT viewname FROM pg_views WHERE schemaname='public')
+              LOOP EXECUTE 'DROP VIEW IF EXISTS '
+                || quote_ident(r.viewname) || ' CASCADE'; END LOOP;
             END $$;
             """
         )
+    close_pool()
     apply_schema()
 
 

@@ -199,21 +199,23 @@ def score_finding(cve: CveFacts, asset: AssetFacts) -> RiskResult:
     scored_band = band_for(total)
     band, floor_rule = apply_exploit_floor(scored_band, cve)
 
-    return RiskResult(
-        score=total,
-        band=band,
-        factors={
-            "cve_id": cve.cve_id,
-            "hostname": asset.hostname,
-            "components": {
-                "severity": {"points": severity, "max": MAX_SEVERITY, **sev_d},
-                "exploit": {"points": exploit, "max": MAX_EXPLOIT, **exp_d},
-                "exposure": {"points": exposure, "max": MAX_EXPOSURE, **expo_d},
-                "asset": {"points": asset_pts, "max": MAX_ASSET, **asset_d},
-            },
-            "total": total,
-            "scored_band": scored_band,
-            "band": band,
-            "band_floor_rule": floor_rule,
+    # `factors` is audit evidence, stored on every assessment row, and it was
+    # 86% of the table's heap at 897 bytes/row. Everything derivable from a
+    # column (cve_id, hostname, total, band) or from POLICY_VERSION (the `max`
+    # constants) is dropped: it was duplicated across every row that shares a
+    # CVE and asset profile. What remains is the part that is genuinely
+    # per-finding -- the inputs and the points each one earned.
+    factors: dict = {
+        "components": {
+            "severity": {"points": severity, **sev_d},
+            "exploit": {"points": exploit, **exp_d},
+            "exposure": {"points": exposure, **expo_d},
+            "asset": {"points": asset_pts, **asset_d},
         },
-    )
+    }
+    # Only recorded when a floor actually moved the band, because "nothing
+    # happened" is the common case and does not need storing 100,000 times.
+    if floor_rule:
+        factors["band_floor"] = {"rule": floor_rule, "scored_band": scored_band}
+
+    return RiskResult(score=total, band=band, factors=factors)

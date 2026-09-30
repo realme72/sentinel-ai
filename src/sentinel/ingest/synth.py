@@ -69,7 +69,10 @@ def generate_assets(count: int = 500, seed: int = 20260930) -> list[dict]:
         assets.append(
             {
                 "hostname": f"{role}-{env[:4]}-{i:03d}",
-                "ip_address": f"10.{rng.randint(0, 40)}.{rng.randint(0, 255)}.{rng.randint(1, 254)}",
+                "ip_address": (
+                    f"10.{rng.randint(0, 40)}.{rng.randint(0, 255)}"
+                    f".{rng.randint(1, 254)}"
+                ),
                 "os_family": os_family,
                 "os_version": OS_PROFILES[os_family]["os_version"],
                 "environment": env,
@@ -78,7 +81,10 @@ def generate_assets(count: int = 500, seed: int = 20260930) -> list[dict]:
                 "data_classification": data_class,
                 "owner_team": team,
                 "owner_email": email,
-                "tags": {"role": role, "region": rng.choice(["ap-south-1", "us-east-1", "eu-west-1"])},
+                "tags": {
+                    "role": role,
+                    "region": rng.choice(["ap-south-1", "us-east-1", "eu-west-1"]),
+                },
             }
         )
     return assets

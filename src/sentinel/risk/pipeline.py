@@ -33,12 +33,7 @@ SELECT f.id AS finding_id, f.first_seen,
 FROM findings f
 JOIN cves   c ON c.cve_id = f.cve_id
 JOIN assets a ON a.id = f.asset_id
-LEFT JOIN LATERAL (
-    SELECT risk_score, risk_band, due_date, policy_version
-    FROM risk_assessments ra
-    WHERE ra.finding_id = f.id
-    ORDER BY ra.computed_at DESC LIMIT 1
-) r ON TRUE
+LEFT JOIN risk_assessments r ON r.finding_id = f.id AND r.is_current
 WHERE f.status = 'open'
 """
 
@@ -47,93 +42,105 @@ def score_open_findings(batch_size: int = 20_000) -> dict:
     t0 = time.perf_counter()
     inserted = unchanged = 0
 
-    with connection() as conn:
-        # Server-side cursor: streams rather than materialising 100k rows.
-        with conn.cursor(name="risk_facts") as src:
-            src.itersize = batch_size
-            src.execute(_FACTS_SQL)
+    # Server-side cursor: streams rather than materialising 100k rows.
+    with connection() as conn, conn.cursor(name="risk_facts") as src:
+        src.itersize = batch_size
+        src.execute(_FACTS_SQL)
 
-            with conn.cursor() as sink:
-                sink.execute(
-                    "CREATE TEMP TABLE _ra (finding_id BIGINT, risk_score NUMERIC, "
-                    "risk_band TEXT, sla_days INT, due_date DATE, factors JSONB, "
-                    "policy_version TEXT) ON COMMIT DROP"
+        with conn.cursor() as sink:
+            sink.execute(
+                "CREATE TEMP TABLE _ra (finding_id BIGINT, risk_score NUMERIC, "
+                "risk_band TEXT, sla_days INT, due_date DATE, factors JSONB, "
+                "policy_version TEXT) ON COMMIT DROP"
+            )
+            pending: list[tuple] = []
+
+            def flush() -> None:
+                if not pending:
+                    return
+                with sink.copy(
+                    "COPY _ra (finding_id, risk_score, risk_band, sla_days, "
+                    "due_date, factors, policy_version) FROM STDIN"
+                ) as cp:
+                    for row in pending:
+                        cp.write_row(row)
+                pending.clear()
+
+            for row in src:
+                cve = CveFacts(
+                    cve_id=row["cve_id"],
+                    cvss_v31_score=row["cvss_v31_score"],
+                    cvss_v40_score=row["cvss_v40_score"],
+                    cvss_severity=row["cvss_severity"],
+                    kev_listed=row["kev_listed"],
+                    kev_ransomware=row["kev_ransomware"],
+                    epss_score=row["epss_score"],
                 )
-                pending: list[tuple] = []
-
-                def flush() -> None:
-                    if not pending:
-                        return
-                    with sink.copy(
-                        "COPY _ra (finding_id, risk_score, risk_band, sla_days, "
-                        "due_date, factors, policy_version) FROM STDIN"
-                    ) as cp:
-                        for row in pending:
-                            cp.write_row(row)
-                    pending.clear()
-
-                for row in src:
-                    cve = CveFacts(
-                        cve_id=row["cve_id"],
-                        cvss_v31_score=row["cvss_v31_score"],
-                        cvss_v40_score=row["cvss_v40_score"],
-                        cvss_severity=row["cvss_severity"],
-                        kev_listed=row["kev_listed"],
-                        kev_ransomware=row["kev_ransomware"],
-                        epss_score=row["epss_score"],
-                    )
-                    asset = AssetFacts(
-                        hostname=row["hostname"],
-                        environment=row["environment"],
-                        internet_facing=row["internet_facing"],
-                        business_criticality=row["business_criticality"],
-                        data_classification=row["data_classification"],
-                    )
-                    risk = score_finding(cve, asset)
-                    first_seen = row["first_seen"]
-                    sla = resolve_sla(
-                        risk, cve,
-                        first_seen=first_seen.date() if hasattr(first_seen, "date") else first_seen,
-                        internet_facing=row["internet_facing"],
-                        kev_due_date=row["kev_due_date"],
-                    )
-
-                    # Skip when nothing an owner would notice has changed.
-                    if (
-                        row["prev_policy"] == POLICY_VERSION
-                        and row["prev_band"] == risk.band
-                        and row["prev_due"] == sla.due_date
-                        and row["prev_score"] is not None
-                        and float(row["prev_score"]) == risk.score
-                    ):
-                        unchanged += 1
-                        continue
-
-                    factors = dict(risk.factors)
-                    factors["sla"] = {
-                        "rule": sla.rule,
-                        "days": sla.sla_days,
-                        "due_date": sla.due_date.isoformat(),
-                        "kev_deadline_passed": sla.kev_deadline_passed,
-                        "kev_due_date": sla.kev_due_date.isoformat() if sla.kev_due_date else None,
-                    }
-                    pending.append((
-                        row["finding_id"], risk.score, risk.band, sla.sla_days,
-                        sla.due_date, json.dumps(factors), POLICY_VERSION,
-                    ))
-                    inserted += 1
-                    if len(pending) >= batch_size:
-                        flush()
-                flush()
-
-                sink.execute(
-                    """
-                    INSERT INTO risk_assessments (finding_id, risk_score, risk_band,
-                                                  sla_days, due_date, factors, policy_version)
-                    SELECT finding_id, risk_score, risk_band, sla_days, due_date,
-                           factors, policy_version FROM _ra
-                    """
+                asset = AssetFacts(
+                    hostname=row["hostname"],
+                    environment=row["environment"],
+                    internet_facing=row["internet_facing"],
+                    business_criticality=row["business_criticality"],
+                    data_classification=row["data_classification"],
                 )
+                risk = score_finding(cve, asset)
+                first_seen = row["first_seen"]
+                sla = resolve_sla(
+                    risk, cve,
+                    first_seen=first_seen.date() if hasattr(first_seen, "date") else first_seen,
+                    internet_facing=row["internet_facing"],
+                    kev_due_date=row["kev_due_date"],
+                )
+
+                # Skip when nothing an owner would notice has changed.
+                if (
+                    row["prev_policy"] == POLICY_VERSION
+                    and row["prev_band"] == risk.band
+                    and row["prev_due"] == sla.due_date
+                    and row["prev_score"] is not None
+                    and float(row["prev_score"]) == risk.score
+                ):
+                    unchanged += 1
+                    continue
+
+                factors = dict(risk.factors)
+                # `days` and `due_date` live in their own columns; only
+                # the reasoning and the compliance fact go in the blob.
+                sla_factors: dict = {"rule": sla.rule}
+                if sla.kev_deadline_passed:
+                    sla_factors["kev_deadline_passed"] = True
+                if sla.kev_due_date:
+                    sla_factors["kev_due_date"] = sla.kev_due_date.isoformat()
+                factors["sla"] = sla_factors
+                pending.append((
+                    row["finding_id"], risk.score, risk.band, sla.sla_days,
+                    sla.due_date, json.dumps(factors), POLICY_VERSION,
+                ))
+                inserted += 1
+                if len(pending) >= batch_size:
+                    flush()
+            flush()
+
+            # uq_risk_current enforces one current assessment per finding,
+            # so the previous one must be demoted before the new one lands.
+            # Same transaction: a crash between the two would otherwise
+            # leave a finding with no current assessment at all.
+            sink.execute(
+                """
+                UPDATE risk_assessments ra SET is_current = FALSE
+                WHERE ra.is_current
+                  AND ra.finding_id IN (SELECT finding_id FROM _ra)
+                """
+            )
+            sink.execute(
+                """
+                INSERT INTO risk_assessments (finding_id, risk_score, risk_band,
+                                              sla_days, due_date, factors,
+                                              policy_version, is_current)
+                SELECT finding_id, risk_score, risk_band, sla_days, due_date,
+                       factors, policy_version, TRUE FROM _ra
+                """
+            )
 
     elapsed = time.perf_counter() - t0
     log.info("risk.scored", inserted=inserted, unchanged=unchanged,

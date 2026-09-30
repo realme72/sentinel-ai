@@ -1,3 +1,26 @@
+"""baseline: schema as of the PostgreSQL 18 migration
+
+Revision ID: 0001_baseline
+Revises:
+Create Date: 2026-09-30
+
+Frozen copy of the schema at the point version control was introduced. It is
+intentionally self-contained rather than reading schema.sql from disk: a
+migration must describe the database at ITS point in history, and a file that
+keeps changing would rewrite the past every time the schema moved on.
+
+Every statement is IF NOT EXISTS, so this applies cleanly to a fresh database
+and is a no-op on the existing one (which is stamped rather than run).
+"""
+
+from alembic import op
+
+revision = "0001_baseline"
+down_revision = None
+branch_labels = None
+depends_on = None
+
+SCHEMA = r"""
 -- Sentinel-AI schema.
 --
 -- Design rule: this file owns FACTS and DERIVED-BY-RULE values only.
@@ -234,3 +257,15 @@ JOIN assets a ON a.id = f.asset_id
 JOIN cves   c ON c.cve_id = f.cve_id
 JOIN risk_assessments ra ON ra.finding_id = f.id
 ORDER BY f.id, ra.computed_at DESC;
+
+"""
+
+
+def upgrade() -> None:
+    op.execute(SCHEMA)
+
+
+def downgrade() -> None:
+    # No downgrade from the baseline: dropping every table is not a migration,
+    # it is data loss wearing a migration's clothes.
+    raise NotImplementedError("baseline revision cannot be downgraded")

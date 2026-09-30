@@ -34,13 +34,18 @@ jobs:
 
       - name: Enable pg_stat_statements
         run: |
+          # Ask Postgres where its config is rather than hardcoding a path:
+          # the postgres:18 image moved PGDATA off /var/lib/postgresql/data.
+          CONF=$(docker exec pg psql -U postgres -tAc 'SHOW config_file' | tr -d '\r')
+          echo "config_file=$CONF"
           docker exec pg bash -c \
-            "echo \"shared_preload_libraries = 'pg_stat_statements'\" >> /var/lib/postgresql/data/postgresql.conf"
+            "echo \"shared_preload_libraries = 'pg_stat_statements'\" >> '$CONF'"
           docker restart pg
           for i in $(seq 1 30); do
-            docker exec pg pg_isready -U postgres && break
+            docker exec pg pg_isready -U postgres -q && break
             sleep 1
           done
+          docker exec pg psql -U postgres -tAc 'SHOW shared_preload_libraries' 
 
       - uses: astral-sh/setup-uv@v5
         with:

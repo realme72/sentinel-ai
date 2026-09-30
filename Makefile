@@ -3,7 +3,7 @@ VENV  := .venv/bin
 DB    ?= sentinel
 
 .PHONY: setup migrate history reset qdrant scan enrich score triage \
-        test lint fmt drift schema-dump prune stats clean
+        test lint fmt drift schema-dump prune stats ci clean
 
 setup:                        ## create venv, install deps, fetch qdrant
 	uv venv --python 3.12 .venv
@@ -49,6 +49,9 @@ lint:
 
 fmt:
 	$(VENV)/ruff format src tests
+
+ci:                           ## run CI's checks locally (clean venv + clean db)
+	./scripts/ci-local.sh
 
 drift:                        ## verify migrations reproduce the live schema
 	./scripts/check-schema-drift.sh

@@ -22,6 +22,7 @@ from pathlib import Path
 import structlog
 
 from sentinel.db.session import connection
+from sentinel.ingest.versions import choose_fixed_version, parse_candidates
 
 log = structlog.get_logger()
 
@@ -74,9 +75,14 @@ def scan_sbom(sbom_path: str) -> ScanOutcome:
                     "cve_id": cve_id,
                     "package_name": v.get("PkgName", ""),
                     "installed_version": v.get("InstalledVersion", ""),
-                    # Trivy returns comma-separated candidates across branches;
-                    # the first is the fix for the installed branch.
-                    "fixed_version": (v.get("FixedVersion") or "").split(",")[0].strip() or None,
+                    # Trivy lists fixes across every maintained branch, so
+                    # the first entry is often on a DIFFERENT branch than the
+                    # installed version -- for CVE-2021-45105 on 2.14.1 it is
+                    # 2.12.3, a downgrade. Pick the lowest candidate strictly
+                    # greater than what is installed.
+                    "fixed_version": choose_fixed_version(
+                        v.get("FixedVersion"), v.get("InstalledVersion")),
+                    "fixed_version_candidates": parse_candidates(v.get("FixedVersion")),
                     "package_type": pkg_type,
                     "severity": v.get("Severity", "UNKNOWN"),
                     "title": v.get("Title"),
@@ -239,35 +245,39 @@ def load_findings(outcomes: list[ScanOutcome], asset_ids: dict[str, int], scan_i
             """
             CREATE TEMP TABLE _stage_findings (
                 asset_id BIGINT, cve_id TEXT, package_name TEXT,
-                installed_version TEXT, fixed_version TEXT, package_type TEXT
+                installed_version TEXT, fixed_version TEXT, package_type TEXT,
+                fixed_version_candidates TEXT[]
             ) ON COMMIT DROP
             """
         )
         with cur.copy(
             "COPY _stage_findings (asset_id, cve_id, package_name, installed_version, "
-            "fixed_version, package_type) FROM STDIN"
+            "fixed_version, package_type, fixed_version_candidates) FROM STDIN"
         ) as copy:
             for f in rows:
                 aid = asset_ids.get(f["hostname"])
                 if aid is None:
                     continue
                 copy.write_row((aid, f["cve_id"], f["package_name"],
-                                f["installed_version"], f["fixed_version"], f["package_type"]))
+                                f["installed_version"], f["fixed_version"],
+                                f["package_type"], f["fixed_version_candidates"]))
 
         # DISTINCT ON guards against a package appearing twice in one SBOM,
         # which would make ON CONFLICT fire twice in a single statement.
         cur.execute(
             """
             INSERT INTO findings (asset_id, cve_id, package_name, installed_version,
-                                  fixed_version, package_type, first_scan_id, last_scan_id)
+                                  fixed_version, package_type,
+                                  fixed_version_candidates, first_scan_id, last_scan_id)
             SELECT DISTINCT ON (asset_id, cve_id, package_name, installed_version)
                    asset_id, cve_id, package_name, installed_version,
-                   fixed_version, package_type, %s, %s
+                   fixed_version, package_type, fixed_version_candidates, %s, %s
             FROM _stage_findings
             ON CONFLICT (asset_id, cve_id, package_name, installed_version) DO UPDATE SET
                 last_seen     = now(),
                 last_scan_id  = EXCLUDED.last_scan_id,
                 fixed_version = EXCLUDED.fixed_version,
+                fixed_version_candidates = EXCLUDED.fixed_version_candidates,
                 status        = CASE WHEN findings.status = 'fixed'
                                      THEN 'open' ELSE findings.status END
             """,

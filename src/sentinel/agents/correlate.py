@@ -121,7 +121,10 @@ SELECT owner_team, owner_email, package_name, risk_band,
        array_remove(array_agg(DISTINCT CASE WHEN kev_listed THEN cve_id END), NULL)
                                                        AS kev_cve_ids,
        array_agg(DISTINCT finding_id)                   AS finding_ids,
-       (array_agg(DISTINCT hostname ORDER BY hostname))[1:200] AS hostnames,
+       -- hostname is CITEXT and psycopg has no citext[] loader, so an
+       -- aggregated citext array returns as the raw literal '{a,b,c}'
+       -- string and silently iterates per character downstream.
+       (array_agg(DISTINCT hostname::text ORDER BY hostname::text))[1:200] AS hostnames,
        array_agg(DISTINCT environment)                  AS environments,
        max(epss_score)                                  AS max_epss,
        array_remove(array_agg(DISTINCT fixed_version), NULL) AS fixed_versions,

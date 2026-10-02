@@ -130,3 +130,17 @@ def test_reduction_is_substantial():
     assert s["findings_covered"] > s["fix_actions"] * 10, (
         f"expected a large reduction, got {s['reduction_factor']}x"
     )
+
+
+@needs_data
+def test_hostnames_come_back_as_a_list_not_a_string():
+    """hostname is CITEXT and psycopg has no citext[] loader, so an aggregated
+    citext array arrives as the literal '{a,b,c}' string. Rendering then
+    iterated it per character and produced `{`, `a`, `p`, `i`, ... in the
+    ticket body. The SQL casts to text; this keeps it that way."""
+    for a in correlate(bands=["critical"])[:5]:
+        assert isinstance(a.hostnames, list), f"got {type(a.hostnames).__name__}"
+        for h in a.hostnames:
+            assert isinstance(h, str) and len(h) > 1, f"suspicious hostname {h!r}"
+        assert isinstance(a.cve_ids, list)
+        assert isinstance(a.environments, list)

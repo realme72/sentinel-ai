@@ -288,6 +288,96 @@ def score() -> None:
     console.print(score_open_findings())
 
 
+tickets_app = typer.Typer(help="Correlate findings and file tickets")
+app.add_typer(tickets_app, name="tickets")
+
+
+@tickets_app.command("preview")
+def tickets_preview(
+    band: str = typer.Option(None, help="filter: critical|high|medium|low"),
+    team: str = typer.Option(None, help="filter by owner team"),
+    limit: int = typer.Option(10, help="rows to show"),
+) -> None:
+    """Show the fix actions that WOULD be filed. Sends nothing."""
+    from sentinel.agents.correlate import correlate, summarise
+    actions = correlate(bands=[band] if band else None,
+                        teams=[team] if team else None)
+    console.print(summarise(actions))
+    tbl = Table(show_header=True, header_style="bold")
+    for col in ("band", "due", "hosts", "cves", "findings", "action"):
+        tbl.add_column(col, justify="right" if col in ("hosts", "cves", "findings") else "left")
+    palette = {"critical": "bold red", "high": "red", "medium": "yellow", "low": "dim"}
+    for a in actions[:limit]:
+        tbl.add_row(f"[{palette.get(a.risk_band,'')}]{a.risk_band}[/]",
+                    str(a.due_date), str(a.asset_count), str(len(a.cve_ids)),
+                    str(len(a.finding_ids)),
+                    f"{a.package_name} -> {a.fixed_version or 'NO FIX'}")
+    console.print(tbl)
+
+
+@tickets_app.command("show")
+def tickets_show(
+    band: str = typer.Option("critical"),
+    index: int = typer.Option(0, help="which action to render"),
+) -> None:
+    """Print one fully rendered ticket body."""
+    from sentinel.agents.correlate import correlate
+    from sentinel.tickets.render import render_ticket
+    actions = correlate(bands=[band])
+    if not actions:
+        console.print("[yellow]no actions in that band[/yellow]")
+        raise typer.Exit(1)
+    a = actions[min(index, len(actions) - 1)]
+    tk = render_ticket(a)
+    console.print(f"[bold]{tk.title}[/bold]")
+    console.print(f"[dim]labels: {', '.join(tk.labels)}[/dim]\n")
+    console.print(tk.body)
+
+
+@tickets_app.command("file")
+def tickets_file(
+    sink_name: str = typer.Option("memory", "--sink", help="memory | github | jira"),
+    band: str = typer.Option(None, help="filter by risk band"),
+    team: str = typer.Option(None, help="filter by owner team"),
+    limit: int = typer.Option(None, help="cap the number of tickets"),
+    execute: bool = typer.Option(
+        False, "--execute",
+        help="actually file. Without this flag nothing is sent.",
+    ),
+) -> None:
+    """File tickets. Dry-run unless --execute is passed."""
+    from sentinel.agents.correlate import correlate
+    from sentinel.tickets.dispatch import dispatch
+    from sentinel.tickets.memory import MemorySink
+
+    def build(name: str):
+        if name == "memory":
+            return MemorySink()
+        if name == "github":
+            from sentinel.tickets.github import GitHubSink
+            return GitHubSink()
+        if name == "jira":
+            from sentinel.tickets.jira import JiraSink
+            return JiraSink()
+        raise typer.BadParameter(f"unknown sink {name!r}")
+
+    sink = build(sink_name)
+    actions = correlate(bands=[band] if band else None,
+                        teams=[team] if team else None, limit=limit)
+
+    # The approval gate. Creating hundreds of issues in someone's tracker is
+    # not something a flag typo should be able to do.
+    if execute and sink_name != "memory":
+        console.print(f"[bold red]About to file {len(actions)} tickets to "
+                      f"{sink_name}.[/bold red]")
+        typer.confirm("Proceed?", abort=True)
+
+    out = dispatch(actions, sink, dry_run=not execute, limit=limit)
+    console.print({k: v for k, v in out.items() if k != "results"})
+    for r in out["results"][:10]:
+        console.print("  " + str(r))
+
+
 @app.command("triage")
 def triage(
     limit: int = typer.Option(15, help="rows to show"),

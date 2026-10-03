@@ -35,8 +35,20 @@ OS_COMMANDS = {
 ECOSYSTEM_COMMANDS = ("mvn", "gradle", "pip", "pip3", "npm", "yarn", "poetry")
 
 # Text that signals the plan was never made concrete.
+# A placeholder is an angle-bracket token the reader must replace. Matching
+# every `<...>` was wrong: `<artifactId>` and `<version>` are real Maven tags,
+# and a plan that shows a pom.xml snippet is MORE actionable, not less. So the
+# token must also contain a word that marks it as a blank to fill in.
+_PLACEHOLDER_WORDS = (
+    r"your|previous|prev|old|current|insert|todo|placeholder|example"
+    r"|service[-_ ]?name|unit[-_ ]?name|host|hostname|path|app[-_ ]?name"
+)
 PLACEHOLDER_RE = re.compile(
-    r"(/path/to/|<[a-z_ -]{3,}>|\byour[-_ ](app|service|host|server)\b"
+    r"(/path/to/"
+    # No \b after the word: it does not match between "previous" and "_",
+    # so `<previous_version>` slipped through.
+    rf"|<(?=[^>\n]{{0,40}}(?:{_PLACEHOLDER_WORDS}))[^>\n]{{3,40}}>"
+    r"|\byour[-_ ](app|service|host|server|application)\b"
     r"|\bexample\.com\b|\bTODO\b|\bxxx+\b|\[insert)",
     re.IGNORECASE,
 )

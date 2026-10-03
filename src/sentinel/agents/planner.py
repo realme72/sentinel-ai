@@ -60,6 +60,7 @@ class PlanState(TypedDict, total=False):
     package_name: str
     os_family: str
     fixed_version: str | None
+    installed_version: str | None
     # --- working ---
     retrieval_k: Annotated[int, _keep_last]
     attempts: Annotated[int, _keep_last]
@@ -147,6 +148,15 @@ def retrieve(state: PlanState) -> dict:
             f"version named in an individual advisory below, because one "
             f"upgrade must resolve every CVE affecting this package on this "
             f"host, and the highest requirement wins."
+        ))
+    installed = state.get("installed_version")
+    if installed:
+        # Named explicitly because the rollback target is the installed
+        # version, and without it the model writes `<previous_version>` --
+        # a placeholder for a fact it was already given.
+        chunks.insert(1, (
+            f"Currently installed version of {state['package_name']} on the "
+            f"affected hosts: {installed}. This is the rollback target."
         ))
     # The CVE prefilter caps results at however many chunks exist for that CVE,
     # so raising retrieval_k often returns the SAME context. Retrying the model
@@ -335,7 +345,8 @@ def build_graph(llm: PlannerLLM, *, checkpointer=None):
 
 def plan_for(
     llm: PlannerLLM, *, cve_id: str, package_name: str, os_family: str,
-    fixed_version: str | None = None, thread_id: str | None = None,
+    fixed_version: str | None = None, installed_version: str | None = None,
+    thread_id: str | None = None,
 ) -> dict:
     graph = build_graph(llm)
     config = {"configurable": {"thread_id": thread_id or f"{cve_id}:{package_name}"}}
@@ -343,6 +354,7 @@ def plan_for(
         {
             "cve_id": cve_id, "package_name": package_name,
             "os_family": os_family, "fixed_version": fixed_version,
+            "installed_version": installed_version,
             "retrieval_k": 8, "attempts": 0, "model": getattr(llm, "model", "unknown"),
         },
         config,

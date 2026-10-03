@@ -104,6 +104,7 @@ def plan_actions(
                 package_name=action.package_name,
                 os_family=action.os_family,
                 fixed_version=action.fixed_version,
+                installed_version=action.installed_version,
                 thread_id=f"{action.idempotency_key}",
             )
             status = out.get("status", "error")

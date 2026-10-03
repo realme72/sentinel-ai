@@ -139,3 +139,30 @@ def test_aggregate_reports_per_check_rates():
 
 def test_aggregate_handles_no_plans():
     assert aggregate([])["plans"] == 0
+
+
+# --- placeholder detection must not punish real build-file syntax ---------
+
+
+@pytest.mark.parametrize("snippet", [
+    "<artifactId>log4j-core</artifactId>",
+    "<groupId>org.apache.logging.log4j</groupId>",
+    "<version>2.17.1</version>",
+    "<dependency><artifactId>x</artifactId></dependency>",
+])
+def test_maven_tags_are_not_placeholders(snippet):
+    """A plan that shows a pom.xml snippet is MORE actionable, not less. The
+    first rubric matched every `<...>` token and penalised exactly the plans
+    that gave the reader real build-file syntax."""
+    md = f"Upgrade to 2.17.1.\n```xml\n{snippet}\n```\n**Rollback** revert"
+    assert s(md, target="2.17.1").no_placeholders
+
+
+@pytest.mark.parametrize("placeholder", [
+    "<previous_version>", "<your-application>", "<service-name>",
+    "<unit-name>", "<hostname>", "<path-to-jar>",
+])
+def test_fill_in_the_blank_tokens_are_still_caught(placeholder):
+    """The discriminator is a word marking the token as a blank to fill in."""
+    md = f"Run: apt-get install openssl={placeholder}\n**Rollback** x"
+    assert not s(md).no_placeholders

@@ -86,6 +86,9 @@ class FixAction:
     hostnames: list[str]
     environments: list[str]
     max_epss: float | None = None
+    # The rollback target. Without it the planner writes `<previous_version>`
+    # for a fact it was already given.
+    installed_version: str | None = None
     # Per-CVE minimum requirements, so a plan can explain why the target is
     # higher than any single CVE demands, and serve a team pinned to an
     # older branch.
@@ -137,6 +140,7 @@ SELECT v.owner_team, v.owner_email, v.package_name, a.os_family, v.risk_band,
        (array_agg(DISTINCT v.hostname::text ORDER BY v.hostname::text))[1:200] AS hostnames,
        array_agg(DISTINCT v.environment)                AS environments,
        max(v.epss_score)                                AS max_epss,
+       (array_agg(DISTINCT v.installed_version))[1]      AS installed_version,
        array_agg(DISTINCT v.cve_id || '=' || COALESCE(v.fixed_version, '')) AS cve_fix_pairs
 FROM v_current_risk v
 JOIN assets a ON a.id = v.asset_id
@@ -217,6 +221,7 @@ def correlate(
             hostnames=r["hostnames"] or [],
             environments=sorted(r["environments"] or []),
             max_epss=float(r["max_epss"]) if r["max_epss"] is not None else None,
+            installed_version=r.get("installed_version"),
             version_requirements=requirements,
         ))
 

@@ -39,7 +39,11 @@ invent one: use the package manager, which knows where its files are \
 (`apt-get install pkg=version`, `apk add pkg=version`, `dnf install pkg-version`), \
 or for a build dependency say to change the version in the project's build \
 file and rebuild. A command the reader must edit before running is not a \
-command."""
+command.
+7. The rollback target is the currently installed version, which the context \
+states. Name it literally -- never write `<previous_version>`. If you must \
+refer to a service whose name you cannot know, describe it ("restart the \
+service that loads this package") rather than inventing `<service-name>`."""
 
 
 class PlanDraft(BaseModel):

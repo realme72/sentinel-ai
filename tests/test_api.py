@@ -193,3 +193,58 @@ def test_every_filter_is_queryable(param, value):
     AmbiguousColumn error that only appears when that filter is used."""
     r = client.get("/findings", params={param: value, "limit": 5})
     assert r.status_code == 200, r.text[:200]
+
+
+# --- dashboard -------------------------------------------------------------
+
+
+def test_dashboard_is_served_at_the_root():
+    r = client.get("/")
+    assert r.status_code == 200
+    assert "Sentinel-AI" in r.text
+    assert "/static/app.js" in r.text
+
+
+def test_static_assets_are_mounted():
+    r = client.get("/static/app.js")
+    assert r.status_code == 200
+    assert "renderTourStep" in r.text
+
+
+@needs_data
+def test_band_distribution_is_ordered_by_severity():
+    """The dashboard renders this straight into a chart, so the API owns the
+    ordering rather than leaving it to client-side sorting."""
+    rows = client.get("/stats/bands").json()
+    order = [r["band"] for r in rows]
+    expected = [b for b in ["critical", "high", "medium", "low"] if b in order]
+    assert order == expected
+    for r in rows:
+        assert r["overdue"] <= r["findings"]
+        assert r["kev"] <= r["findings"]
+
+
+@needs_data
+def test_backlog_buckets_are_chronological():
+    rows = client.get("/stats/backlog", params={"weeks": 12}).json()
+    weeks = [r["week"] for r in rows]
+    assert weeks == sorted(weeks)
+    for r in rows:
+        assert r["urgent"] <= r["findings"]
+
+
+def test_backlog_window_is_bounded():
+    """A dashboard must not be able to ask for an unbounded scan."""
+    assert client.get("/stats/backlog", params={"weeks": 0}).status_code == 422
+    assert client.get("/stats/backlog", params={"weeks": 999}).status_code == 422
+
+
+@needs_data
+def test_chart_endpoints_stay_cheap():
+    """These aggregate 103k rows; the dashboard calls them on every page load,
+    so they must not degrade into a client-side scan."""
+    import time
+    for path in ("/stats/bands", "/stats/backlog"):
+        t0 = time.perf_counter()
+        assert client.get(path).status_code == 200
+        assert time.perf_counter() - t0 < 3.0, f"{path} too slow for a page load"

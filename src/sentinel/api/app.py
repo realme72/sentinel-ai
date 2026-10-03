@@ -14,10 +14,15 @@ that could file 1,705 tickets is a liability, not a feature.
 
 from __future__ import annotations
 
+import threading
+from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Annotated, Literal
 
 import structlog
 from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from sentinel.api.models import (
     AssetOut,
@@ -35,7 +40,29 @@ from sentinel.db.session import query, query_one
 
 log = structlog.get_logger()
 
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """Warm the embedding model in the background.
+
+    It is lazily loaded and takes ~15s cold, so without this the first dense
+    search on the dashboard costs 4+ seconds and looks like the retrieval is
+    slow -- when the measured steady-state is ~14ms. Warming on a daemon
+    thread keeps startup instant; a search arriving before it finishes simply
+    waits on the same lru_cache as it would have anyway.
+    """
+    def warm() -> None:
+        try:
+            from sentinel.rag.embed import get_model
+            get_model()
+        except Exception as exc:  # noqa: BLE001 - the API must start regardless
+            log.warning("api.embed_warmup_failed", error=str(exc)[:160])
+
+    threading.Thread(target=warm, name="embed-warmup", daemon=True).start()
+    yield
+
+
 app = FastAPI(
+    lifespan=lifespan,
     title="Sentinel-AI",
     version="0.1.0",
     description=(
@@ -44,6 +71,17 @@ app = FastAPI(
         "finding exposes the arithmetic that produced its priority."
     ),
 )
+
+
+STATIC_DIR = Path(__file__).with_name("static")
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+
+@app.get("/", include_in_schema=False)
+def dashboard() -> FileResponse:
+    """The dashboard, served from the same origin as the API so there is no
+    CORS layer and no build step."""
+    return FileResponse(STATIC_DIR / "index.html")
 
 
 # --- health & stats --------------------------------------------------------
@@ -100,6 +138,49 @@ def stats(
         from sentinel.agents.correlate import correlate
         fix_actions = len(correlate())
     return Stats(**row, fix_actions=fix_actions)
+
+
+@app.get("/stats/bands", tags=["meta"])
+def band_distribution() -> list[dict]:
+    """Findings per risk band, plus how many are overdue in each.
+
+    Aggregated server-side: the dashboard must not pull 103k rows to count
+    four buckets.
+    """
+    return query(
+        """
+        SELECT risk_band AS band, count(*) AS findings,
+               count(*) FILTER (WHERE due_date < CURRENT_DATE) AS overdue,
+               count(DISTINCT asset_id) AS assets,
+               count(*) FILTER (WHERE kev_listed) AS kev
+        FROM v_current_risk WHERE status = 'open'
+        GROUP BY risk_band
+        ORDER BY CASE risk_band WHEN 'critical' THEN 1 WHEN 'high' THEN 2
+                                WHEN 'medium' THEN 3 ELSE 4 END
+        """
+    )
+
+
+@app.get("/stats/backlog", tags=["meta"])
+def due_date_backlog(
+    weeks: Annotated[int, Query(ge=2, le=52)] = 12,
+) -> list[dict]:
+    """Open findings bucketed by the week they fall due.
+
+    One series (findings), so the chart needs no legend -- its title names it.
+    """
+    return query(
+        """
+        SELECT to_char(date_trunc('week', due_date), 'YYYY-MM-DD') AS week,
+               count(*) AS findings,
+               count(*) FILTER (WHERE risk_band IN ('critical','high')) AS urgent
+        FROM v_current_risk
+        WHERE status = 'open'
+          AND due_date < CURRENT_DATE + (%(weeks)s || ' weeks')::interval
+        GROUP BY 1 ORDER BY 1
+        """,
+        {"weeks": weeks},
+    )
 
 
 # --- assets ----------------------------------------------------------------

@@ -117,12 +117,21 @@ Runs entirely on localhost. **No Docker required.**
 - [x] Correlation: 103,166 findings -> 1,705 fix actions
 - [x] GitHub / Jira / memory ticket sinks, dry-run by default
 - [x] DeepEval suite + deterministic quality rubric
-- [x] FastAPI read API (16 endpoints, `sentinel serve`)
-- [ ] Dashboard
+- [x] FastAPI read API (18 endpoints, `sentinel serve`)
+- [x] Dashboard with an interactive tutorial
 
 **[Full architecture write-up →](docs/architecture.md)**
 
-202 tests, CI green.
+```bash
+sentinel serve      # http://127.0.0.1:8000  — dashboard + /docs
+```
+
+The dashboard ships an **interactive tutorial** that walks the real data and
+stops at the evidence for each stage: the 61x finding-to-action reduction, a
+CVSS 5.9 outranking a CVSS 8.1, and a live retrieval comparison where
+dense-only search returns the wrong CVE.
+
+218 tests, CI green.
 
 ## Models
 

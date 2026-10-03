@@ -64,3 +64,39 @@ def test_all_candidates_below_installed_still_returns_something():
     the highest available rather than nothing, and let the corpus show it."""
     chosen = choose_fixed_version("1.0.0, 1.2.0", "9.9.9")
     assert chosen == "1.2.0"
+
+
+# --- rate limiter ----------------------------------------------------------
+
+
+def test_limiter_paces_to_the_token_budget_not_the_request_count():
+    """8,000 tokens/min at ~1,840 tokens per call is four calls per minute --
+    the token cap binds long before the 28 requests/min one."""
+    import time
+
+    from sentinel.util.ratelimit import SyncRollingWindowLimiter
+
+    lim = SyncRollingWindowLimiter(requests=28, window=0.6, tokens=8000)
+    immediate = 0
+    for _ in range(4):
+        if lim.acquire(1650) == 0.0:
+            immediate += 1
+        lim.record_actual(1839)
+    assert immediate == 4, "four calls must fit inside one window"
+
+    t0 = time.perf_counter()
+    waited = lim.acquire(1650)
+    assert waited > 0, "the fifth must wait"
+    assert time.perf_counter() - t0 < 1.5, "and only until the window clears"
+
+
+def test_limiter_ceiling_can_be_raised_from_a_response_header():
+    """The planner learns the real quota from x-ratelimit-limit-tokens rather
+    than trusting a hardcoded guess."""
+    from sentinel.util.ratelimit import SyncRollingWindowLimiter
+
+    lim = SyncRollingWindowLimiter(requests=28, window=60.0, tokens=2000)
+    lim.acquire(1650)
+    lim.record_actual(1839)
+    lim.tokens = 8000                      # what _observe_limits does
+    assert lim.acquire(1650) == 0.0, "a raised ceiling must free capacity"

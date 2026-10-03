@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections import deque
 
 import httpx
 import structlog
@@ -34,34 +33,9 @@ from tenacity import (
 
 from sentinel.config import get_settings
 from sentinel.db.session import connection, query
+from sentinel.util.ratelimit import RollingWindowLimiter
 
 log = structlog.get_logger()
-
-
-class RollingWindowLimiter:
-    """Allow at most `limit` acquisitions per `window` seconds.
-
-    A plain `asyncio.Semaphore` caps *concurrency*, not *rate* -- with fast
-    responses it would sail past 50/30s. This tracks completion timestamps and
-    sleeps until the oldest one leaves the window.
-    """
-
-    def __init__(self, limit: int, window: float) -> None:
-        self.limit = limit
-        self.window = window
-        self._times: deque[float] = deque()
-        self._lock = asyncio.Lock()
-
-    async def acquire(self) -> None:
-        async with self._lock:
-            while True:
-                now = time.monotonic()
-                while self._times and now - self._times[0] >= self.window:
-                    self._times.popleft()
-                if len(self._times) < self.limit:
-                    self._times.append(now)
-                    return
-                await asyncio.sleep(self.window - (now - self._times[0]) + 0.05)
 
 
 class RetryableStatus(Exception):

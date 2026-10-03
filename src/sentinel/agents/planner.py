@@ -124,12 +124,36 @@ def retrieve(state: PlanState) -> dict:
          f"on {state['os_family']}")
     result = search(q, k=state.get("retrieval_k", 8), prefilter=True)
     hits = result["hits"]
+
+    # The remediation target is scanner data, not corpus text, and it is not
+    # derivable from the retrieved advisories: correlation sets it to the
+    # highest version required across the whole package so one upgrade
+    # satisfies every band, and the CVE that drives that maximum often sits in
+    # a different band than the one being planned. Requiring the model to both
+    # name 2.25.4 and find it in a chunk that says "Fixed in version 2.15.0"
+    # is unsatisfiable -- it fails as ungrounded or as missing-target, forever.
+    #
+    # So the target is supplied as an explicit, provenanced context fact. It
+    # comes from findings.fixed_version, which Trivy reported and which the
+    # version-selection logic already validated as above the installed
+    # version. That is at least as authoritative as any advisory sentence.
+    chunks = [h.content for h in hits]
+    target = state.get("fixed_version")
+    if target:
+        chunks.insert(0, (
+            f"Scanner-reported remediation target: upgrade "
+            f"{state['package_name']} to {target} on {state['os_family']}. "
+            f"This is the version to install. It may be higher than the "
+            f"version named in an individual advisory below, because one "
+            f"upgrade must resolve every CVE affecting this package on this "
+            f"host, and the highest requirement wins."
+        ))
     # The CVE prefilter caps results at however many chunks exist for that CVE,
     # so raising retrieval_k often returns the SAME context. Retrying the model
     # on identical input just buys the identical failure at full price.
     previous = state.get("prev_context_size", -1)
     return {
-        "context_chunks": [h.content for h in hits],
+        "context_chunks": chunks,
         "context_chunk_ids": [h.chunk_id for h in hits],
         "context_grew": len(hits) > previous,
         "prev_context_size": len(hits),
@@ -157,9 +181,18 @@ def draft_plan(state: PlanState, *, llm: PlannerLLM) -> dict:
 
 
 def ground_check(state: PlanState) -> dict:
-    """Deterministic. The model proposes, this disposes."""
-    report = check_grounding(state.get("plan_markdown", ""),
-                             state.get("context_chunks", []))
+    """Deterministic. The model proposes, this disposes.
+
+    The known target version is passed as required: a plan that quotes some
+    other real version from the corpus satisfies provenance while still being
+    the wrong instruction.
+    """
+    target = state.get("fixed_version")
+    report = check_grounding(
+        state.get("plan_markdown", ""),
+        state.get("context_chunks", []),
+        required_versions=[target] if target else None,
+    )
     if not report.passed:
         log.warning("planner.ungrounded", cve=state["cve_id"],
                     attempt=state.get("attempts"), reason=report.reason())
@@ -238,9 +271,15 @@ def route_after_cache(state: PlanState) -> str:
 
 
 def route_after_retrieve(state: PlanState) -> str:
-    # No context means the corpus lacks this CVE. Calling the model anyway
-    # would invite exactly the fabrication the gate exists to catch.
-    return "empty" if not state.get("context_chunks") else "ok"
+    """Refuse to plan when nothing was actually retrieved.
+
+    Keyed on `context_chunk_ids` -- the RETRIEVED chunks -- not on
+    `context_chunks`, which now always holds at least the injected scanner
+    target. A target alone is "install version X" with no advisory behind it:
+    grounded, but too thin to be worth a model call, and no context is exactly
+    when a model is most inclined to fill the gap itself.
+    """
+    return "empty" if not state.get("context_chunk_ids") else "ok"
 
 
 def route_after_grounding(state: PlanState) -> str:

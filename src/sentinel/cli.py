@@ -13,7 +13,12 @@ from sentinel.config import get_settings
 from sentinel.db import session as db
 
 structlog.configure(
-    processors=[structlog.dev.ConsoleRenderer(colors=True)],
+    processors=[
+        # Without a timestamper a multi-hour job's log cannot be used to
+        # locate a stall, which is how a slow planner run went undiagnosed.
+        structlog.processors.TimeStamper(fmt="%H:%M:%S"),
+        structlog.dev.ConsoleRenderer(colors=True),
+    ],
     wrapper_class=structlog.make_filtering_bound_logger(20),
 )
 log = structlog.get_logger()
@@ -286,6 +291,75 @@ def score() -> None:
     """Apply the deterministic risk policy to every open finding."""
     from sentinel.risk.pipeline import score_open_findings
     console.print(score_open_findings())
+
+
+plan_app = typer.Typer(help="Generate remediation plans")
+app.add_typer(plan_app, name="plan")
+
+
+@plan_app.command("one")
+def plan_one(
+    cve: str = typer.Argument(..., help="CVE id"),
+    package: str = typer.Argument(..., help="package name"),
+    os_family: str = typer.Option("debian"),
+    fixed_version: str = typer.Option(None),
+    provider: str = typer.Option(None, help="openai | anthropic"),
+) -> None:
+    """Plan a single CVE/package and print the result."""
+    from sentinel.agents.planner import plan_for
+    from sentinel.agents.run import PlannerRouter
+
+    llm = PlannerRouter(provider=provider or get_settings().planner_provider).for_band("critical")
+    out = plan_for(llm, cve_id=cve, package_name=package,
+                   os_family=os_family, fixed_version=fixed_version)
+    g = out.get("grounding", {})
+    colour = "green" if g.get("passed") else "red"
+    console.print(f"[{colour}]status={out['status']} grounded={g.get('passed')}[/{colour}]"
+                  f"  model={getattr(llm, 'model', '?')}")
+    if not g.get("passed"):
+        console.print(f"[red]rejected: cves={g.get('ungrounded_cves')} "
+                      f"versions={g.get('ungrounded_versions')}[/red]")
+    console.print()
+    console.print(out.get("plan_markdown") or "(no plan)")
+
+
+@plan_app.command("run")
+def plan_run(
+    band: str = typer.Option(None, help="critical|high|medium|low; omit for all"),
+    limit: int = typer.Option(None, help="cap the number of actions"),
+    provider: str = typer.Option(None, help="openai | anthropic"),
+) -> None:
+    """Plan every fix action, routing model by risk band."""
+    from sentinel.agents.correlate import correlate
+    from sentinel.agents.run import plan_actions
+
+    actions = correlate(bands=[band] if band else None)
+    console.print(f"planning [bold]{len(actions)}[/bold] fix actions"
+                  + (f" (band={band})" if band else ""))
+    out = plan_actions(actions, provider=provider, limit=limit)
+    console.print({k: v for k, v in out.items() if k != "failures"})
+    if out["failures"]:
+        console.print("[yellow]sample failures:[/yellow]")
+        for f in out["failures"][:8]:
+            console.print(f"  {f}")
+
+
+@plan_app.command("stats")
+def plan_stats() -> None:
+    """Coverage of the remediation plan cache."""
+    rows = db.query(
+        """
+        SELECT grounding_passed, count(*) AS plans,
+               count(DISTINCT package_name) AS packages
+        FROM remediation_plans GROUP BY 1 ORDER BY 1 DESC
+        """
+    )
+    tbl = Table(show_header=True, header_style="bold")
+    for col in ("grounded", "plans", "packages"):
+        tbl.add_column(col)
+    for r in rows:
+        tbl.add_row(str(r["grounding_passed"]), str(r["plans"]), str(r["packages"]))
+    console.print(tbl)
 
 
 tickets_app = typer.Typer(help="Correlate findings and file tickets")

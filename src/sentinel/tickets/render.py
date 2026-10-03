@@ -88,7 +88,7 @@ def render_body(action: FixAction, *, plan_markdown: str | None = None,
     lines.append("")
 
     env = ", ".join(action.environments) or "unknown"
-    os_f = ", ".join(action.os_families) or "unknown"
+    os_f = action.os_family
     lines.append(f"**Scope** — environments: {env} · OS: {os_f} · "
                  f"owner: {action.owner_team} ({action.owner_email})")
     lines.append("")

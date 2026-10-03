@@ -7,12 +7,13 @@ programmes get ignored: the queue is unreadable, so nobody reads it.
 But one `apt-get install curl=7.74.0-1.3+deb11u2` closes 15 CVEs on a host.
 The unit a human acts on is the *upgrade*, not the finding.
 
-Grouping key: (owner_team, package, risk_band, has_fix). Measured here:
+Grouping key: (owner_team, package, os_family, risk_band, has_fix). Measured:
 
     per finding                      103,166
     per (host, package, fix)          24,890
     per (team, package, fix, band)     3,718
-    per (team, package, band, fix?)      937   <- 110x reduction
+    per (team, package, band, fix?)      937
+    + os_family                        1,705   <- 60x reduction, and correct
 
 Two decisions, each forced by the data.
 
@@ -24,6 +25,15 @@ deadline for a critical host and a 90-day one for forty low-risk hosts.
 into many tickets: log4j-core on the `infra` team produced 11 tickets across
 7 target versions for the same ~10 hosts, because each CVE names the release
 that first fixed it. Nobody upgrades a package seven times.
+
+**os_family IS in the key**, which the first version missed. Version strings
+are not comparable across packaging systems: Alpine openssl fixes at
+`1.1.1l-r0` and Debian at `1.1.1k-1+deb11u1`, and taking a max across those
+namespaces is meaningless. It produced a plan telling an Alpine host to
+install a Debian package, which passed grounding because both strings exist
+somewhere in the corpus. 28 packages in this fleet span families, and the
+remediation commands differ too (`apk` vs `apt-get`), so they are genuinely
+different pieces of work.
 
 So the target is the highest fixed version required across the whole
 (team, package) scope -- which is safe for every member, since it is at or
@@ -62,6 +72,9 @@ class FixAction:
     # the one this band's CVEs demand. Upgrading once must satisfy all of them.
     fixed_version: str | None
     risk_band: str
+    # Single family, not a list: a ticket spanning packaging systems cannot
+    # name one target version or one command.
+    os_family: str
     due_date: date
     max_risk_score: float
     asset_count: int
@@ -71,7 +84,6 @@ class FixAction:
     kev_cve_ids: list[str]
     finding_ids: list[int]
     hostnames: list[str]
-    os_families: list[str]
     environments: list[str]
     max_epss: float | None = None
     # Per-CVE minimum requirements, so a plan can explain why the target is
@@ -92,7 +104,7 @@ class FixAction:
         # Excludes fixed_version as well: the target rises as new CVEs land
         # on the same package, and that is an update to the same campaign.
         basis = "|".join([
-            self.owner_team, self.package_name, self.risk_band,
+            self.owner_team, self.package_name, self.os_family, self.risk_band,
             "fix" if self.fixed_version else "nofix",
         ])
         return hashlib.sha256(basis.encode()).hexdigest()[:32]
@@ -100,7 +112,8 @@ class FixAction:
     @property
     def title(self) -> str:
         target = f" to {self.fixed_version}" if self.fixed_version else " (no fix available)"
-        scope = f"{self.asset_count} host" + ("s" if self.asset_count != 1 else "")
+        scope = f"{self.asset_count} {self.os_family} host" + (
+            "s" if self.asset_count != 1 else "")
         return (f"[{self.risk_band.upper()}] Upgrade {self.package_name}{target} "
                 f"on {scope}")
 
@@ -110,39 +123,39 @@ class FixAction:
 
 
 _GROUP_SQL = """
-SELECT owner_team, owner_email, package_name, risk_band,
-       (fixed_version IS NOT NULL)                     AS has_fix,
-       min(due_date)                                   AS due_date,
-       max(risk_score)                                 AS max_risk_score,
-       count(DISTINCT asset_id)                        AS asset_count,
-       count(DISTINCT asset_id) FILTER (WHERE internet_facing)  AS internet_facing_count,
-       count(DISTINCT asset_id) FILTER (WHERE environment = 'prod') AS prod_count,
-       array_agg(DISTINCT cve_id ORDER BY cve_id)       AS cve_ids,
-       array_remove(array_agg(DISTINCT CASE WHEN kev_listed THEN cve_id END), NULL)
+SELECT v.owner_team, v.owner_email, v.package_name, a.os_family, v.risk_band,
+       (v.fixed_version IS NOT NULL)                   AS has_fix,
+       min(v.due_date)                                 AS due_date,
+       max(v.risk_score)                               AS max_risk_score,
+       count(DISTINCT v.asset_id)                      AS asset_count,
+       count(DISTINCT v.asset_id) FILTER (WHERE v.internet_facing) AS internet_facing_count,
+       count(DISTINCT v.asset_id) FILTER (WHERE v.environment = 'prod') AS prod_count,
+       array_agg(DISTINCT v.cve_id ORDER BY v.cve_id)   AS cve_ids,
+       array_remove(array_agg(DISTINCT CASE WHEN v.kev_listed THEN v.cve_id END), NULL)
                                                        AS kev_cve_ids,
-       array_agg(DISTINCT finding_id)                   AS finding_ids,
-       -- hostname is CITEXT and psycopg has no citext[] loader, so an
-       -- aggregated citext array returns as the raw literal '{a,b,c}'
-       -- string and silently iterates per character downstream.
-       (array_agg(DISTINCT hostname::text ORDER BY hostname::text))[1:200] AS hostnames,
-       array_agg(DISTINCT environment)                  AS environments,
-       max(epss_score)                                  AS max_epss,
-       array_remove(array_agg(DISTINCT fixed_version), NULL) AS fixed_versions,
-       array_agg(DISTINCT cve_id || '=' || COALESCE(fixed_version, '')) AS cve_fix_pairs
-FROM v_current_risk
-WHERE status = 'open' %(extra_where)s
-GROUP BY owner_team, owner_email, package_name, risk_band, (fixed_version IS NOT NULL)
-ORDER BY max(risk_score) DESC, min(due_date) ASC
+       array_agg(DISTINCT v.finding_id)                 AS finding_ids,
+       (array_agg(DISTINCT v.hostname::text ORDER BY v.hostname::text))[1:200] AS hostnames,
+       array_agg(DISTINCT v.environment)                AS environments,
+       max(v.epss_score)                                AS max_epss,
+       array_agg(DISTINCT v.cve_id || '=' || COALESCE(v.fixed_version, '')) AS cve_fix_pairs
+FROM v_current_risk v
+JOIN assets a ON a.id = v.asset_id
+WHERE v.status = 'open' %(extra_where)s
+GROUP BY v.owner_team, v.owner_email, v.package_name, a.os_family, v.risk_band,
+         (v.fixed_version IS NOT NULL)
+ORDER BY max(v.risk_score) DESC, min(v.due_date) ASC
 """
 
-# The highest fixed version demanded anywhere for a (team, package), so every
-# band's ticket names the same target and the upgrade happens once.
+# Highest fixed version per (team, package, os_family). Scoped to one
+# packaging system, because comparing an Alpine version to a Debian one is
+# not a comparison.
 _PACKAGE_TARGET_SQL = """
-SELECT owner_team, package_name,
-       array_remove(array_agg(DISTINCT fixed_version), NULL) AS versions
-FROM v_current_risk
-WHERE status = 'open' AND fixed_version IS NOT NULL
-GROUP BY owner_team, package_name
+SELECT v.owner_team, v.package_name, a.os_family,
+       array_remove(array_agg(DISTINCT v.fixed_version), NULL) AS versions
+FROM v_current_risk v
+JOIN assets a ON a.id = v.asset_id
+WHERE v.status = 'open' AND v.fixed_version IS NOT NULL
+GROUP BY v.owner_team, v.package_name, a.os_family
 """
 
 
@@ -155,10 +168,10 @@ def correlate(
     """Group open findings into fix actions, most urgent first."""
     clauses, params = [], {}
     if bands:
-        clauses.append("AND risk_band = ANY(%(bands)s)")
+        clauses.append("AND v.risk_band = ANY(%(bands)s)")
         params["bands"] = bands
     if teams:
-        clauses.append("AND owner_team = ANY(%(teams)s)")
+        clauses.append("AND v.owner_team = ANY(%(teams)s)")
         params["teams"] = teams
 
     sql = _GROUP_SQL % {"extra_where": " ".join(clauses)}
@@ -169,19 +182,12 @@ def correlate(
 
     # Highest required version per (team, package), computed with version
     # ordering rather than string ordering -- 2.9.10 must beat 2.9.8.
-    targets: dict[tuple[str, str], str] = {}
+    targets: dict[tuple[str, str, str], str] = {}
     for r in query(_PACKAGE_TARGET_SQL):
         versions = r["versions"] or []
         if versions:
-            targets[(r["owner_team"], r["package_name"])] = max(versions, key=version_key)
-
-    os_by_package: dict[str, list[str]] = {}
-    for r in query(
-        "SELECT f.package_name, array_agg(DISTINCT a.os_family) AS families "
-        "FROM findings f JOIN assets a ON a.id = f.asset_id "
-        "WHERE f.status='open' GROUP BY f.package_name"
-    ):
-        os_by_package[r["package_name"]] = sorted(r["families"])
+            key = (r["owner_team"], r["package_name"], r["os_family"])
+            targets[key] = max(versions, key=version_key)
 
     actions: list[FixAction] = []
     for r in rows:
@@ -195,9 +201,11 @@ def correlate(
             owner_team=r["owner_team"],
             owner_email=r["owner_email"],
             package_name=r["package_name"],
-            fixed_version=(targets.get((r["owner_team"], r["package_name"]))
+            fixed_version=(targets.get((r["owner_team"], r["package_name"],
+                                        r["os_family"]))
                            if r["has_fix"] else None),
             risk_band=r["risk_band"],
+            os_family=r["os_family"],
             due_date=r["due_date"],
             max_risk_score=float(r["max_risk_score"]),
             asset_count=r["asset_count"],
@@ -207,7 +215,6 @@ def correlate(
             kev_cve_ids=r["kev_cve_ids"] or [],
             finding_ids=r["finding_ids"] or [],
             hostnames=r["hostnames"] or [],
-            os_families=os_by_package.get(r["package_name"], []),
             environments=sorted(r["environments"] or []),
             max_epss=float(r["max_epss"]) if r["max_epss"] is not None else None,
             version_requirements=requirements,

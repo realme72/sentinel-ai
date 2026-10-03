@@ -39,10 +39,35 @@ class Settings(BaseSettings):
     nvd_concurrency: int = 4
     nvd_delay_seconds: float = 0.7
 
-    # --- LLM ---
+    # --- LLM: Anthropic ---
     planner_model: str = "claude-opus-5"
     bulk_model: str = "claude-haiku-4-5"
     llm_concurrency: int = 8
+
+    # --- LLM: any OpenAI-compatible endpoint (Groq, Gemini, Cerebras, Ollama) ---
+    openai_base_url: str = "https://api.groq.com/openai/v1"
+    openai_model: str = "openai/gpt-oss-120b"        # critical + high
+    openai_bulk_model: str = "openai/gpt-oss-20b"    # medium + low
+    openai_api_key: str | None = None
+    # Starting guess only -- the planner reads x-ratelimit-* response headers
+    # and re-paces itself, so a stale number here costs one slow call rather
+    # than a whole throttled run. Measured on Groq's free tier: 1,000
+    # requests/day and 8,000 tokens/minute per model.
+    openai_requests_per_minute: int = 28
+    openai_tokens_per_minute: int = 8000
+    # Counted as a reservation against BOTH the per-minute and per-day token
+    # budgets, so it directly sets how many plans a day buys. Measured: a real
+    # grounded plan used 491 completion tokens, so 2500 reserved five times
+    # what it needed and cut the daily plan count by the same factor.
+    # 1200 leaves headroom for a long plan without wasting the budget.
+    openai_max_tokens: int = 1200
+    # gpt-oss reasoning tokens count against max_tokens and crowd out the
+    # JSON; "low" leaves room for the answer. Empty to omit the field for
+    # providers that reject it.
+    openai_reasoning_effort: str | None = "low"
+
+    # Which planner the router uses per risk band.
+    planner_provider: str = "openai"   # openai | anthropic
 
     # --- embeddings (local, free) ---
     embed_model: str = "BAAI/bge-small-en-v1.5"
@@ -64,6 +89,15 @@ class Settings(BaseSettings):
 
     # --- paths ---
     data_dir: Path = Field(default=PROJECT_ROOT / "data")
+
+    def resolve_openai_key(self) -> str | None:
+        """Settings field first, then the conventional provider env vars."""
+        import os
+        return (
+            self.openai_api_key
+            or os.environ.get("GROQ_API_KEY")
+            or os.environ.get("OPENAI_API_KEY")
+        )
 
     @property
     def raw_dir(self) -> Path:

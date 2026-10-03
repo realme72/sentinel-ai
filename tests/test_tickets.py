@@ -25,7 +25,7 @@ def action(**over) -> FixAction:
         kev_cve_ids=["CVE-2021-44228"],
         finding_ids=list(range(20)),
         hostnames=[f"api-prod-{i:03d}" for i in range(10)],
-        os_families=["debian"], environments=["prod"], max_epss=0.99999,
+        os_family="debian", environments=["prod"], max_epss=0.99999,
         version_requirements={"CVE-2021-44228": "2.15.0", "CVE-2021-45046": "2.16.0"},
     )
     base.update(over)

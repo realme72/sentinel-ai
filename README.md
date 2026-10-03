@@ -109,13 +109,40 @@ Runs entirely on localhost. **No Docker required.**
 
 ## Status
 
-- [x] Schema under Alembic migrations, deterministic risk + SLA engine, 22 tests
-- [x] Synthetic 500-host fleet with real vulnerabilities (100,937 findings, 720 CVEs)
+- [x] Schema under Alembic migrations, deterministic risk + SLA engine
+- [x] Synthetic 500-host fleet with real vulnerabilities (103,166 findings, 728 CVEs)
 - [x] NVD / KEV / EPSS enrichment
-- [ ] Hybrid retrieval + dual vector store
-- [ ] LangGraph remediation planner + grounding gate
+- [x] Hybrid retrieval, pgvector + Qdrant behind one protocol
+- [x] LangGraph remediation planner + non-LLM grounding gate
+- [x] Correlation: 103,166 findings -> 1,705 fix actions
+- [x] GitHub / Jira / memory ticket sinks, dry-run by default
 - [ ] DeepEval suite in CI
-- [ ] Correlation agent, owner digests, dashboard
+- [ ] FastAPI, owner digests, dashboard
+
+146 tests, CI green.
+
+## Models
+
+The planner sits behind a `PlannerLLM` protocol, so the provider is
+configuration rather than architecture:
+
+| Provider | Use |
+|---|---|
+| Any OpenAI-compatible endpoint (Groq, Gemini, Cerebras, Ollama) | default; Groq's free tier runs the whole fleet |
+| Anthropic (Opus 5 / Haiku 4.5) | when quality matters more than cost |
+
+Model is routed by risk band -- the stronger model for critical and high, the
+cheaper one for medium and low.
+
+**The whole fleet costs 108 LLM calls.** 103,166 findings collapse to 1,705
+fix actions, which share only 108 unique
+`(cve, package, os_family, fixed_version)` plan-cache keys. That is an 88%
+cache hit rate, and it is why this runs inside a free tier's daily quota.
+
+> Free hosted tiers generally reserve the right to train on submitted data.
+> What this sends is hostnames, package versions and unpatched CVEs. Fine for
+> a synthetic fleet; use a self-hosted model or a paid API for real asset
+> inventory.
 
 ### Measured
 

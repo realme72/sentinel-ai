@@ -17,7 +17,7 @@ def action(**over) -> FixAction:
         max_risk_score=96.0, asset_count=10, internet_facing_count=1, prod_count=3,
         cve_ids=["CVE-2021-44228"], kev_cve_ids=["CVE-2021-44228"],
         finding_ids=[1, 2, 3], hostnames=["api-prod-035"],
-        os_families=["debian"], environments=["prod"],
+        os_family="debian", environments=["prod"],
     )
     base.update(over)
     return FixAction(**base)
@@ -68,8 +68,10 @@ def test_title_states_the_action_not_the_finding():
     assert action().title.startswith("[CRITICAL] Upgrade ")
     assert "2.25.4" in action().title
     assert "no fix available" in action(fixed_version=None).title
-    assert "1 host" in action(asset_count=1).title and \
-           "1 hosts" not in action(asset_count=1).title
+    # The OS family is named because the command differs by packaging system.
+    assert "debian" in action().title
+    assert "1 debian host" in action(asset_count=1).title
+    assert "1 debian hosts" not in action(asset_count=1).title
 
 
 # --- against the real fleet ------------------------------------------------
@@ -80,27 +82,34 @@ needs_data = pytest.mark.skipif(not _has_data, reason="no scored findings in thi
 
 
 @needs_data
-def test_one_upgrade_per_package_per_band():
+def test_one_upgrade_per_package_per_band_per_os():
     """The bug this replaced: grouping on fixed_version produced 11 tickets
     for log4j-core on one team across 7 target versions, for the same hosts.
-    Nobody upgrades a package seven times."""
+    Nobody upgrades a package seven times.
+
+    One ticket per (band, os_family) is the correct granularity -- the band
+    carries the deadline and the OS carries the command."""
     log4j = [a for a in correlate()
              if "log4j-core" in a.package_name and a.owner_team == "infra"]
     assert log4j, "expected log4j findings for the infra team"
-    assert len(log4j) <= 4, f"one ticket per band at most, got {len(log4j)}"
-    assert len({a.risk_band for a in log4j}) == len(log4j), "one per band"
+    keys = [(a.risk_band, a.os_family) for a in log4j]
+    assert len(keys) == len(set(keys)), f"duplicate (band, os) groups: {keys}"
 
 
 @needs_data
-def test_every_band_names_the_same_target_version():
-    """Satisfying the urgent ticket must close the relaxed ones. Different
-    targets per band would mean upgrading the same package twice."""
-    by_package: dict[tuple[str, str], set[str]] = {}
+def test_every_band_names_the_same_target_within_an_os_family():
+    """Satisfying the urgent ticket must close the relaxed ones, so bands on
+    the same package and OS must agree on the target.
+
+    Scoped per os_family: Alpine and Debian legitimately differ, and
+    conflating them was the cross-packaging bug."""
+    by_scope: dict[tuple[str, str, str], set[str]] = {}
     for a in correlate():
         if a.fixed_version:
-            by_package.setdefault((a.owner_team, a.package_name), set()).add(a.fixed_version)
-    multi = {k: v for k, v in by_package.items() if len(v) > 1}
-    assert not multi, f"packages with inconsistent targets: {list(multi)[:3]}"
+            key = (a.owner_team, a.package_name, a.os_family)
+            by_scope.setdefault(key, set()).add(a.fixed_version)
+    multi = {k: v for k, v in by_scope.items() if len(v) > 1}
+    assert not multi, f"inconsistent targets within one OS: {list(multi)[:3]}"
 
 
 @needs_data
@@ -144,3 +153,31 @@ def test_hostnames_come_back_as_a_list_not_a_string():
             assert isinstance(h, str) and len(h) > 1, f"suspicious hostname {h!r}"
         assert isinstance(a.cve_ids, list)
         assert isinstance(a.environments, list)
+
+
+@needs_data
+def test_target_version_never_crosses_packaging_systems():
+    """Alpine openssl fixes at 1.1.1l-r0 and Debian at 1.1.1k-1+deb11u1.
+    Comparing those is not a comparison, and the first version of this code
+    produced a plan telling an Alpine host to install a Debian package --
+    which passed grounding, because both strings exist in the corpus."""
+    suffixes = {"alpine": "-r", "debian": "deb", "rhel": ".el"}
+    for a in correlate():
+        if not a.fixed_version:
+            continue
+        marker = suffixes.get(a.os_family)
+        if marker and marker not in a.fixed_version:
+            # Not every version carries a distro marker, so only assert the
+            # negative: it must not carry a DIFFERENT family's marker.
+            for other_os, other_marker in suffixes.items():
+                if other_os != a.os_family and other_marker in a.fixed_version:
+                    raise AssertionError(
+                        f"{a.package_name} on {a.os_family} targets "
+                        f"{a.fixed_version}, which looks like {other_os}"
+                    )
+
+
+@needs_data
+def test_one_os_family_per_action():
+    for a in correlate()[:50]:
+        assert isinstance(a.os_family, str) and a.os_family

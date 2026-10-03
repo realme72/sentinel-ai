@@ -8,6 +8,7 @@ verifies control flow, not SQL and not model quality.
 """
 
 from dataclasses import dataclass
+from datetime import date
 
 import pytest
 
@@ -237,3 +238,106 @@ def test_retry_continues_while_context_is_still_growing(monkeypatch):
     out = run(llm)
     assert out["status"] == "ungrounded"
     assert len(llm.calls) == P.MAX_ATTEMPTS, "growing context earns the full budget"
+
+
+# --- the target must be reachable ------------------------------------------
+
+
+def test_retrieve_supplies_the_scanner_target_as_context(monkeypatch):
+    """Correlation sets the target to the highest version required across the
+    whole package, and the CVE driving that maximum is often in a different
+    risk band than the one being planned. So the target is frequently absent
+    from the retrieved advisories.
+
+    Without injecting it, the grounding check is unsatisfiable: naming the
+    target fails as ungrounded, and naming the advisory's version fails as
+    missing-target. Every plan fails forever.
+    """
+    monkeypatch.setattr(P, "search", lambda q, **kw: {
+        "hits": [FakeHit(1, "CVE-2021-44228 ... Fixed in version 2.15.0.")]
+    })
+    out = P.retrieve({"cve_id": CVE, "package_name": PKG, "os_family": "debian",
+                      "fixed_version": "2.25.4", "retrieval_k": 8})
+    joined = " ".join(out["context_chunks"])
+    assert "2.25.4" in joined, "the target must be present in context"
+    assert "2.15.0" in joined, "the advisory must still be present"
+    assert "highest requirement wins" in joined
+
+
+def test_no_target_means_no_injected_fact(monkeypatch):
+    """When the scanner published no fix there is nothing to assert."""
+    monkeypatch.setattr(P, "search", lambda q, **kw: {"hits": [FakeHit(1, "advisory")]})
+    out = P.retrieve({"cve_id": CVE, "package_name": PKG, "os_family": "debian",
+                      "fixed_version": None, "retrieval_k": 8})
+    assert out["context_chunks"] == ["advisory"]
+
+
+def test_target_version_is_satisfiable_end_to_end(wired):
+    """A plan naming the correlator's target must now pass both halves of the
+    gate: present in context (injected) and naming the required version."""
+    target_draft = PlanDraft(
+        summary="Upgrade to the scanner target.",
+        steps=["Upgrade log4j-core to 2.25.4."],
+        commands=["mvn versions:use-dep-version -DdepVersion=2.25.4"],
+        rollback="Redeploy previous.",
+    )
+    llm = ScriptedPlanner({CVE: [target_draft]})
+    out = P.plan_for(llm, cve_id=CVE, package_name=PKG, os_family="debian",
+                     fixed_version="2.25.4")
+    assert out["status"] == "grounded", out["grounding"]
+    assert out["grounding"]["missing_required"] == []
+
+
+def test_injected_target_does_not_defeat_the_no_context_guard(monkeypatch):
+    """The target fact is always present, so the guard must key on retrieved
+    chunks. Otherwise "no advisory found" silently became "plan anyway"."""
+    monkeypatch.setattr(P, "query_one", lambda *a, **k: None)
+    monkeypatch.setattr(P, "search", lambda *a, **k: {"hits": []})
+    llm = ScriptedPlanner({})
+    out = P.plan_for(llm, cve_id=CVE, package_name=PKG, os_family="debian",
+                     fixed_version="2.25.4")
+    assert out["status"] == "no_context"
+    assert llm.calls == []
+
+
+# --- provider daily quota --------------------------------------------------
+
+
+def test_run_stops_on_daily_quota_instead_of_grinding(monkeypatch):
+    """Groq's free tier caps tokens per DAY (200,000), a limit that appears in
+    no response header -- only in the 429 body. It cannot be waited out within
+    a run, and each retry honours a ~60s retry-after, so continuing costs
+    ~3 minutes per remaining action for nothing."""
+    from sentinel.agents import run as R
+    from sentinel.agents.openai_compat import DailyQuotaExhausted
+
+    calls = {"n": 0}
+
+    def exhausted(*a, **k):
+        calls["n"] += 1
+        raise DailyQuotaExhausted(
+            "Rate limit reached ... on tokens per day (TPD): Limit 200000, "
+            "Used 199000, Requested 1428"
+        )
+
+    monkeypatch.setattr(R, "plan_for", exhausted)
+    # The router builds a real planner before plan_for is reached, and that
+    # constructor requires an API key -- which tests and CI deliberately lack.
+    monkeypatch.setattr(R.PlannerRouter, "for_band",
+                        lambda self, band: ScriptedPlanner({}))
+
+    from sentinel.agents.correlate import FixAction
+
+    def act(i):
+        return FixAction(
+            owner_team="infra", owner_email="i@e.com", package_name=f"pkg{i}",
+            fixed_version="1.2.3", risk_band="critical", os_family="debian",
+            due_date=date(2026, 10, 3), max_risk_score=90.0, asset_count=1,
+            internet_facing_count=0, prod_count=1, cve_ids=["CVE-2021-44228"],
+            kev_cve_ids=[], finding_ids=[i], hostnames=["h"], environments=["prod"],
+        )
+
+    out = R.plan_actions([act(i) for i in range(10)])
+    assert calls["n"] == 1, "must stop after the first quota error, not retry 10x"
+    assert out["quota_exhausted"] == 10
+    assert "tokens per day" in out["failures"][0]["reason"]

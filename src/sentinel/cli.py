@@ -293,6 +293,61 @@ def score() -> None:
     console.print(score_open_findings())
 
 
+@app.command("serve")
+def serve(
+    host: str = typer.Option("127.0.0.1", help="bind address"),
+    port: int = typer.Option(8000),
+    reload: bool = typer.Option(False, help="auto-reload on code changes"),
+) -> None:
+    """Run the read API. Docs at /docs."""
+    import uvicorn
+    console.print(f"[green]http://{host}:{port}/docs[/green]")
+    uvicorn.run("sentinel.api.app:app", host=host, port=port, reload=reload)
+
+
+eval_app = typer.Typer(help="Evaluate plan quality")
+app.add_typer(eval_app, name="eval")
+
+
+@eval_app.command("run")
+def eval_run(
+    limit: int = typer.Option(None, help="only the N most recent plans"),
+    judge: bool = typer.Option(False, help="also run the sampled LLM-judged pass"),
+    sample: int = typer.Option(5, help="plans to judge when --judge is set"),
+) -> None:
+    """Score cached plans.
+
+    The deterministic rubric is free and runs over everything. The judged pass
+    is opt-in because it spends the same daily token budget as the planner.
+    """
+    from sentinel.evals.run import run_deterministic, run_judged
+
+    det = run_deterministic(limit=limit)
+    if det.get("plans", 0) == 0:
+        console.print("[yellow]no plans to evaluate -- run `sentinel plan run` first[/yellow]")
+        raise typer.Exit(1)
+
+    tbl = Table(title="plan quality (deterministic)", show_header=True)
+    tbl.add_column("check")
+    tbl.add_column("pass rate", justify="right")
+    for k, v in det.items():
+        if k.endswith("_rate"):
+            colour = "green" if v >= 0.9 else "yellow" if v >= 0.6 else "red"
+            tbl.add_row(k.removesuffix("_rate"), f"[{colour}]{v:.1%}[/{colour}]")
+    console.print(tbl)
+    console.print(f"plans={det['plans']}  mean_score={det['mean_score']}  "
+                  f"actionable={det['actionable_rate']:.1%}")
+    for row in det["not_actionable"][:5]:
+        console.print(f"  [red]x[/red] {row['plan']}  failed={row['failed']}")
+
+    if judge:
+        console.print("\n[dim]running judged pass (spends token budget)...[/dim]")
+        out = run_judged(sample=sample)
+        console.print({k: v for k, v in out.items() if k != "results"})
+        for r in out.get("results", []):
+            console.print(f"  {r}")
+
+
 plan_app = typer.Typer(help="Generate remediation plans")
 app.add_typer(plan_app, name="plan")
 

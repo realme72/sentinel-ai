@@ -32,7 +32,14 @@ compensating controls instead of guessing an upgrade target.
 the command, and what to restart. "Apply vendor updates" is not a plan.
 4. Never propose destructive commands (filesystem wipes, piping remote \
 scripts to a shell).
-5. Assume the reader owns the host but has not read the advisory."""
+5. Assume the reader owns the host but has not read the advisory.
+6. Never write placeholder paths or names. Do not emit `/path/to/...`, \
+`<your-service>`, `example.com`, or `TODO`. If you do not know a path, do not \
+invent one: use the package manager, which knows where its files are \
+(`apt-get install pkg=version`, `apk add pkg=version`, `dnf install pkg-version`), \
+or for a build dependency say to change the version in the project's build \
+file and rebuild. A command the reader must edit before running is not a \
+command."""
 
 
 class PlanDraft(BaseModel):

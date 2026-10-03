@@ -116,10 +116,13 @@ Runs entirely on localhost. **No Docker required.**
 - [x] LangGraph remediation planner + non-LLM grounding gate
 - [x] Correlation: 103,166 findings -> 1,705 fix actions
 - [x] GitHub / Jira / memory ticket sinks, dry-run by default
-- [ ] DeepEval suite in CI
-- [ ] FastAPI, owner digests, dashboard
+- [x] DeepEval suite + deterministic quality rubric
+- [x] FastAPI read API (16 endpoints, `sentinel serve`)
+- [ ] Dashboard
 
-146 tests, CI green.
+**[Full architecture write-up →](docs/architecture.md)**
+
+202 tests, CI green.
 
 ## Models
 
